@@ -2,7 +2,8 @@
 
 git worktree ごとに隔離VM（Lima/vz microVM）＋VM内専用dockerdを与えるRust製CLI／TUI。
 Docker Sandboxes のOSS代替（Dockerアカウント・ライセンス・Docker Desktop不要）。
-全メカニズムの実機検証記録は `../myapp/VERIFICATION.md`。
+全メカニズムの実機検証記録は [VERIFICATION.md](VERIFICATION.md)（Docker Sandboxes からの移行理由、
+採用しなかった方式とその失敗理由、摘出したバグまで含む）。
 
 ```
 brew install lima && cargo build --release
@@ -82,8 +83,10 @@ wtxは何にも依存しない。連携はすべて汎用インターフェー�
 - 通常リポジトリ（非worktree）モードでは、VM起動直後に `wtx-gitmount.service` が bind を張り直すまでの
   ごく短い間だけホストの `.git` がVMから書き込み可能になる。worktree モードは Lima のマウント自体が
   ro なのでこの窓は無い
-- launchd の plist にはビルド成果物の絶対パス（`target/release/wtx`）が焼かれる。`cargo clean` すると
-  ミラーが起動しなくなるので `wtx mirror install` を再実行する。`~/.wtx/mirrors.json` を編集した場合も
+- launchd の plist には `wtx mirror install` を実行したときの実行パスが焼かれる。
+  PATH 上のシンボリックリンク経由で実行すればそのパスが入るので移動に強いが、
+  ビルド成果物を直接叩いて登録した場合は `cargo clean` や移動でミラーが起動しなくなる。
+  その場合は `wtx mirror install` を再実行する。`~/.wtx/mirrors.json` を編集した場合も
   ソケット一覧を作り直すため再実行が必要
 
 ## 既知の制約 / TODO

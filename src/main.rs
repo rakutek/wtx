@@ -86,6 +86,9 @@ enum Cmd {
 }
 
 fn main() {
+    // `wtx ls | head` のようにパイプ先が先に閉じたとき、Rust 既定の SIGPIPE 無視のままだと
+    // 標準出力への書き込みが panic するので、通常の Unix コマンドと同じ挙動に戻す。
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     if let Err(e) = run() {
         eprintln!("wtx: {e}");
         std::process::exit(1);
