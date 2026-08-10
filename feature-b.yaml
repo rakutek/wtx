@@ -1,0 +1,54 @@
+minimumLimaVersion: 2.0.0
+base:
+- template:_images/ubuntu-lts
+
+vmType: vz
+mountType: virtiofs
+cpus: 2
+memory: 4GiB
+disk: 20GiB
+
+mounts:
+- location: "/Users/sakaguchiraku/sbx-verify/myapp-feature-b"
+  writable: true
+- location: "/Users/sakaguchiraku/sbx-verify/myapp/.git"
+  writable: true
+
+containerd:
+  system: false
+  user: false
+
+# 自動ポートフォワードを全無効化（複数VMの5432衝突防止）。公開はssh -L/-Rで明示的に行う。
+portForwards:
+- guestIP: "0.0.0.0"
+  guestPortRange: [1, 65535]
+  proto: any
+  ignore: true
+
+provision:
+- mode: system
+  script: |
+    #!/bin/bash
+    set -eux -o pipefail
+    command -v docker >/dev/null 2>&1 && exit 0
+    mkdir -p /etc/docker
+    cat >/etc/docker/daemon.json <<'EOF'
+    {
+      "registry-mirrors": ["http://host.lima.internal:5001"],
+      "insecure-registries": ["host.lima.internal:5001"]
+    }
+    EOF
+    export DEBIAN_FRONTEND=noninteractive
+    curl -fsSL https://get.docker.com | sh
+    usermod -aG docker {{.User}}
+    git config --system --add safe.directory '*'
+
+probes:
+- script: |
+    #!/bin/bash
+    set -eux -o pipefail
+    if ! timeout 60s bash -c "until command -v docker >/dev/null 2>&1; do sleep 3; done"; then
+      echo >&2 "docker is not installed yet"
+      exit 1
+    fi
+  hint: See /var/log/cloud-init-output.log in the guest

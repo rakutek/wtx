@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# wtx — worktree ごとの隔離VM（Lima/vz）+ VM内dockerd + レジストリミラー
+#
+# Docker Sandboxes の OSS 代替。検証記録: sbx-verify/myapp/VERIFICATION.md
+#   wtx mirror up                     ホストにpull-throughレジストリキャッシュを起動（初回に一度）
+#   wtx up NAME WORKDIR [MOUNT[:ro]...]  VMを作成・起動（WORKDIRとMOUNTはホストと同じパスでマウント）
+#   wtx exec NAME [-w DIR] CMD...     VM内でコマンド実行（非対話、dockerグループ有効）
+#   wtx shell NAME                    VM内の対話シェル
+#   wtx ls [--json]                   VM一覧
+#   wtx forward NAME HOST:GUEST       VMのポートをホストに公開 (ssh -L)
+#   wtx bridge NAME GUEST:HOST        ホストのポートをVM内に露出 (ssh -R、オーケストレータ連携用)
+#   wtx unforward NAME PORT           forward/bridgeを解除
+#   wtx stop NAME / wtx rm NAME       停止 / 削除（DB・イメージごと消える）
+set -euo pipefail
+
+WTX_HOME="${WTX_HOME:-$HOME/.wtx}"
+MIRROR_PORT="${WTX_MIRROR_PORT:-5001}"
+MIRROR_NAME="wtx-registry-mirror"
+mkdir -p "$WTX_HOME"
+
+die() { echo "wtx: $*" >&2; exit 1; }
+
+ssh_direct() { # NAME CMD... — control masterを迂回した新規接続（provisionで足したグループが効く）
+  local name=$1; shift
+  ssh -F "$HOME/.lima/$name/ssh.config" -o ControlMaster=no -o ControlPath=none "lima-$name" "$@"
+}
+
+gen_yaml() { # NAME PRIMARY [EXTRA[:ro]...]
+  local name=$1 primary=$2; shift 2
+  local gname gmail mounts=""
+  gname=$(git config --global user.name 2>/dev/null || echo "wtx")
+  gmail=$(git config --global user.email 2>/dev/null || echo "wtx@localhost")
+
+  mounts+="- location: \"$primary\"\n  writable: true\n"
+  local m loc w
+  for m in "$@"; do
+    if [[ "$m" == *:ro ]]; then loc="${m%:ro}"; w=false; else loc="$m"; w=true; fi
+    mounts+="- location: \"$loc\"\n  writable: $w\n"
+  done
+
+  cat > "$WTX_HOME/$name.yaml" <<EOF
+minimumLimaVersion: 2.0.0
+base:
+- template:_images/ubuntu-lts
+
+vmType: vz
+mountType: virtiofs
+cpus: ${WTX_CPUS:-2}
+memory: ${WTX_MEMORY:-4GiB}
+disk: ${WTX_DISK:-20GiB}
+
+mounts:
+$(printf '%b' "$mounts")
+
+containerd:
+  system: false
+  user: false
+
+# 自動ポートフォワード全無効化（複数VMの同一ポート衝突防止）。公開は wtx forward で明示的に。
+portForwards:
+- guestIP: "0.0.0.0"
+  guestPortRange: [1, 65535]
+  proto: any
+  ignore: true
+
+provision:
+- mode: system
+  script: |
+    #!/bin/bash
+    set -eux -o pipefail
+    command -v docker >/dev/null 2>&1 && exit 0
+    mkdir -p /etc/docker
+    cat >/etc/docker/daemon.json <<'DAEMON'
+    {
+      "registry-mirrors": ["http://host.lima.internal:$MIRROR_PORT"],
+      "insecure-registries": ["host.lima.internal:$MIRROR_PORT"]
+    }
+    DAEMON
+    export DEBIAN_FRONTEND=noninteractive
+    curl -fsSL https://get.docker.com | sh
+    usermod -aG docker {{.User}}
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+    apt-get install -y nodejs
+    git config --system --add safe.directory '*'
+- mode: user
+  script: |
+    #!/bin/bash
+    set -eux -o pipefail
+    git config --global user.name "$gname"
+    git config --global user.email "$gmail"
+
+probes:
+- script: |
+    #!/bin/bash
+    set -eux -o pipefail
+    if ! timeout 60s bash -c "until command -v docker >/dev/null 2>&1 && command -v node >/dev/null 2>&1; do sleep 3; done"; then
+      echo >&2 "docker/node is not installed yet"
+      exit 1
+    fi
+  hint: See /var/log/cloud-init-output.log in the guest
+EOF
+}
+
+cmd="${1:-help}"; shift || true
+case "$cmd" in
+  mirror)
+    sub="${1:-status}"
+    case "$sub" in
+      up)
+        docker inspect "$MIRROR_NAME" >/dev/null 2>&1 || docker run -d --name "$MIRROR_NAME" \
+          --restart unless-stopped -p "$MIRROR_PORT:5000" \
+          -e REGISTRY_PROXY_REMOTEURL=https://registry-1.docker.io registry:2 >/dev/null
+        docker start "$MIRROR_NAME" >/dev/null
+        curl -fsS "http://localhost:$MIRROR_PORT/v2/" >/dev/null && echo "mirror: http://localhost:$MIRROR_PORT" ;;
+      status) curl -fsS "http://localhost:$MIRROR_PORT/v2/" >/dev/null && echo "mirror: up" || echo "mirror: down" ;;
+      *) die "usage: wtx mirror up|status" ;;
+    esac ;;
+  up)
+    name="${1:?usage: wtx up NAME WORKDIR [MOUNT[:ro]...]}"; workdir="${2:?WORKDIR required}"; shift 2
+    [ -d "$workdir" ] || die "workdir not found: $workdir"
+    curl -fsS "http://localhost:$MIRROR_PORT/v2/" >/dev/null 2>&1 || echo "wtx: warning: mirror is down — pull は Docker Hub 直行になります (wtx mirror up)" >&2
+    gen_yaml "$name" "$(cd "$workdir" && pwd)" "$@"
+    limactl start --name "$name" --tty=false "$WTX_HOME/$name.yaml"
+    echo "ready: wtx shell $name" ;;
+  exec)
+    name="${1:?NAME required}"; shift
+    dir=""
+    if [ "${1:-}" = "-w" ]; then dir="$2"; shift 2; fi
+    [ $# -gt 0 ] || die "usage: wtx exec NAME [-w DIR] CMD..."
+    q=$(printf '%q ' "$@")
+    if [ -n "$dir" ]; then ssh_direct "$name" "cd $(printf '%q' "$dir") && $q"; else ssh_direct "$name" "$q"; fi ;;
+  shell)
+    name="${1:?NAME required}"
+    ssh -F "$HOME/.lima/$name/ssh.config" -o ControlMaster=no -o ControlPath=none -t "lima-$name" ;;
+  ls) limactl list "$@" ;;
+  forward|bridge)
+    name="${1:?NAME required}"; spec="${2:?PORT spec required (A:B)}"
+    a="${spec%%:*}"; b="${spec##*:}"
+    sock="$WTX_HOME/$name-$a.sock"
+    if [ "$cmd" = forward ]; then flag="-L $a:localhost:$b"; else flag="-R $a:127.0.0.1:$b"; fi
+    # shellcheck disable=SC2086
+    ssh -F "$HOME/.lima/$name/ssh.config" -o ControlMaster=no -o ControlPath=none \
+      -f -N -M -S "$sock" $flag "lima-$name"
+    echo "$cmd $spec active (stop: wtx unforward $name $a)" ;;
+  unforward)
+    name="${1:?NAME required}"; port="${2:?PORT required}"
+    ssh -S "$WTX_HOME/$name-$port.sock" -O exit "lima-$name" 2>/dev/null && echo "stopped" ;;
+  stop) limactl stop "${1:?NAME required}" ;;
+  rm)
+    name="${1:?NAME required}"
+    for s in "$WTX_HOME/$name"-*.sock; do [ -e "$s" ] && ssh -S "$s" -O exit "lima-$name" 2>/dev/null || true; done
+    limactl delete -f "$name"
+    rm -f "$WTX_HOME/$name.yaml" ;;
+  help|*)
+    sed -n '2,/^set -euo/p' "$0" | grep '^#' | sed 's/^# \{0,1\}//' ;;
+esac
