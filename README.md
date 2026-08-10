@@ -5,6 +5,8 @@ Docker Sandboxes のOSS代替（Dockerアカウント・ライセンス・Docker
 全メカニズムの実機検証記録は [VERIFICATION.md](VERIFICATION.md)（Docker Sandboxes からの移行理由、
 採用しなかった方式とその失敗理由、摘出したバグまで含む）。
 
+エージェント用スキル（[skills/wtx/SKILL.md](skills/wtx/SKILL.md)）は `npx skills add rakutek/wtx` で導入できる。
+
 ```
 brew install lima && cargo build --release
 wtx mirror install                                 # 任意: レジストリキャッシュ（launchdオンデマンド）
