@@ -285,3 +285,42 @@ VMはセキュリティ境界ではなく、macOSで worktree ごとに dockerd�
 - ゴールデンVMは `wtx image rm && wtx image build` で再構築が必要（forwardAgent の焼き込み）
 - 実機の旧VM（hono-dev）は、VM作成時にホストrepoが空（unborn main）だったため
   VMローカル git に ref が1つも無く、未回収コミットはゼロと確認してから移行した
+
+## フェーズ9: worktree連動シミュレータ（wtx sim、2026-08-11）
+
+worktreeごとのdb・api分離に「worktree専用のiOSシミュレータ」を加え、デバッグが
+worktree内で完結するようにした（設計と却下案は docs/DESIGN-sim.md）。
+シミュレータはVM内では動かない（CoreSimulatorはmacOSホストのXcodeに属する）ため、
+デバイスはホスト側に置き、寿命だけをVMのメタデータに結びつける。
+
+### 実装前の実機検証（全項目、使い捨てデバイス wtx-verify-* で実施）
+
+| # | 項目 | 結果 |
+|---|---|---|
+| 1 | `simctl clone` がデータを引き継ぐか | **PASS** — デバイスdata直下とアプリ（Safari）のdataコンテナ内に置いたマーカーが両方clone先に存在。clone所要 約10秒 |
+| 2 | clone に clone 元の Shutdown が必要か | **PASS（必要）** — Booted のまま clone すると SimError 405 `Unable to clone device in current state: Booted`。`--from` のVM複製と同じ「止めて写して戻す」を採用 |
+| 3 | `SIMCTL_CHILD_*` がアプリプロセスに届くか | **PASS** — `SIMCTL_CHILD_WTX_PROBE=... simctl launch` した Safari のプロセス環境（`ps eww`）に `WTX_PROBE` が出現 |
+| 4 | orca emulator がUDIDを受けるか | **PASS** — `orca emulator devices` はwtx作成デバイスを `id`=UDID で列挙。未登録パスへの `attach` は `selector_not_found` の明確なエラー。リポジトリを `orca repo add` してからの `attach <UDID> --worktree path:<リポジトリ>` は `attached: true` で完走し、helper（ws/stream/ax エンドポイント）が起動した |
+| 5 | VM再起動をまたぐ forward 再確立 | **PASS** — VM停止で ssh マスターは自然終了しソケットも消える（残骸unforwardの前置は不要と判明。異常終了の保険として `ensure_forward` は掃除してから張る） |
+| 6 | 起動中シミュレータのコスト | boot 約19秒（headless、GUIなし）。RSS合計は共有ページで28GBに膨らみ実態を示さない。shutdown時のvm_stat差分で実消費はGB級（3〜7GiB。他プロセス込みの粗い値）→ **boot on demand・VM削除時shutdownの方針を裏付け** |
+
+実装上の知見: `simctl create` はruntime省略時に案内行がUDIDと同じstdoutに混ざる
+（2行になる）。**runtimeを明示すると出力はUDID 1行**になるので、wtxは常に明示する。
+既定機種は「最新runtimeのsupportedDeviceTypesのうちカタログ minRuntimeVersion 最大の
+iPhone」で選ぶ（配列の並び順に依存しない。iOS 18.5 では iPhone 16e）。
+Shutdown のままの `simctl launch` は SimError 405（`Unable to lookup in current state`）に
+なるため、エージェント向け手順（SKILL.md）には boot → `bootstatus -b` の待ちを明記した。
+
+### 実装後のエンドツーエンド確認（全PASS、実VM 2台で実施）
+
+| 項目 | 結果 |
+|---|---|
+| `wtx up NAME DIR --sim` でVMとデバイス（`wtx-NAME`）が同時にでき、UDIDがメタに記録される | PASS |
+| `wtx which` がworktree直下でもサブディレクトリでもVM名を解決 | PASS |
+| `wtx sim wire api:8765` が 42000 を払い出し forward を張る | PASS — `curl localhost:42000` が VM内サーバに到達（HTTP 200） |
+| `eval "$(wtx sim env)"` で WTX_VM_NAME / WTX_SIM_UDID / WTX_PORT_API が入る | PASS |
+| VM停止→起動後の `sim env` が死んだ forward を自動で張り直す | PASS — 再実行だけで HTTP 200 に復帰 |
+| `wtx up --from` がシミュレータもcloneし（マーカー到達）、ポートは label:guest を引き継いでホスト側だけ新規払い出し（42001） | PASS |
+| `wtx ls` に `sim:Shutdown` が付く（sim を使うVMがあるときだけ simctl に問い合わせ） | PASS |
+| `wtx rm` がデバイス・メタ・ソケットまで残さず消す | PASS |
+| 再アタッチ（既存VMへの `wtx up`）で sim_udid・ports が保持される | PASS（メタを毎回書き直す実装だったため、prev からの引き継ぎを追加） |

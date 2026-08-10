@@ -28,6 +28,8 @@ struct App {
     confirm_delete: bool,
     mirror_line: String,
     last_refresh: Instant,
+    /// worktree専用シミュレータの状態（UDID → Booted/Shutdown）。sim を使うVMが無ければ空。
+    sim_states: BTreeMap<String, String>,
 }
 
 const HELP: &str = "r:refresh  s:start/stop  Enter:shell/fold  Space:fold  d:delete  q:quit";
@@ -42,6 +44,7 @@ impl App {
             confirm_delete: false,
             mirror_line: String::new(),
             last_refresh: Instant::now(),
+            sim_states: BTreeMap::new(),
         };
         a.refresh();
         a.state.select(Some(0));
@@ -49,9 +52,14 @@ impl App {
     }
 
     fn refresh(&mut self) {
+        let instances = lima::list_instances();
+        // sim を使うVMがあるときだけ simctl に問い合わせる（xcrun 無し環境を巻き込まない）
+        self.sim_states = crate::sim::states_for(
+            &instances.iter().filter(|i| !i.sim_udid.is_empty()).map(|i| i.sim_udid.clone()).collect::<Vec<_>>(),
+        );
         // プロジェクト（main_repo）ごとにまとめ、リポジトリを持たないVMは最後に置く
         let mut groups: BTreeMap<String, Vec<Instance>> = BTreeMap::new();
-        for i in lima::list_instances() {
+        for i in instances {
             groups.entry(i.repo.clone()).or_default().push(i);
         }
         let mut keys: Vec<String> = groups.keys().cloned().collect();
@@ -304,6 +312,15 @@ fn draw(f: &mut Frame, app: &mut App) {
                     Span::styled(pad(&i.status, 10), Style::new().fg(color)),
                     Span::raw(pad(&i.branch, 16)),
                 ];
+                if !i.sim_udid.is_empty() {
+                    let st = app.sim_states.get(&i.sim_udid).map(String::as_str).unwrap_or("missing");
+                    let c = match st {
+                        "Booted" => Color::Green,
+                        "Shutdown" => Color::DarkGray,
+                        _ => Color::Yellow,
+                    };
+                    spans.push(Span::styled(format!("sim:{st}  "), Style::new().fg(c)));
+                }
                 if i.orphaned {
                     spans.push(Span::styled(
                         "orphaned",
@@ -323,9 +340,15 @@ fn draw(f: &mut Frame, app: &mut App) {
 
     let detail = match app.selected_row() {
         Some(Row::Vm(i)) => format!(
-            "workdir : {}\nrepo    : {}{}",
+            "workdir : {}\nrepo    : {}{}{}",
             i.workdir,
             if i.repo.is_empty() { "-" } else { &i.repo },
+            if i.sim_udid.is_empty() {
+                String::new()
+            } else {
+                let st = app.sim_states.get(&i.sim_udid).map(String::as_str).unwrap_or("missing");
+                format!("\nsim     : {} ({st})", i.sim_udid)
+            },
             if i.orphaned {
                 "\nORPHANED: the worktree is gone (commits are on the host; delete when done)"
             } else {

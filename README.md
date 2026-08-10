@@ -108,6 +108,14 @@ tty なしで1フレームだけ描画して終了する（動作確認用）。
 - **ポート**: Limaの自動フォワードは全無効化。複数VMが各自の `localhost:5432` を同時に持てる。
   公開は `wtx forward`（ssh -L）、ホスト常駐サービスへの逆方向は `wtx bridge`（ssh -R）
 - **VM内ツール**: docker（rootful）+ Node 22 + Claude Code + git（identityはホスト設定から注入）
+- **worktree専用iOSシミュレータ（`wtx sim`）**: シミュレータはVMに入らない（CoreSimulatorは
+  ホストのXcodeに属する）ので、ホスト側にworktree専用デバイス `wtx-NAME` を作り、寿命だけを
+  VMに連動させる（`wtx up --sim` で作成、`rm`/`prune` で削除、`--from` でアプリ・データごとclone）。
+  `wtx sim wire api:3000` でVM内ポートをホストへ払い出し（42000〜、記録式）、エージェントは
+  worktree内で `eval "$(wtx sim env)"` → `$WTX_SIM_UDID` / `$WTX_PORT_API` を使う。
+  NAME省略時はカレントディレクトリから解決（`wtx which` も同じ）。操作（tap等）はwtxには無く、
+  orca emulator / `xcrun simctl` に任せる。設計と検証は [docs/DESIGN-sim.md](docs/DESIGN-sim.md)
+  と VERIFICATION.md フェーズ9
 
 ## オーケストレータ（Orca等）との連携方針
 

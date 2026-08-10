@@ -6,6 +6,7 @@ mod launchd;
 mod lima;
 mod mirror;
 mod repo;
+mod sim;
 mod sshx;
 mod tui;
 mod util;
@@ -51,6 +52,12 @@ enum Cmd {
         /// Provision from scratch instead of cloning the golden VM
         #[arg(long)]
         no_clone: bool,
+        /// Also create a per-worktree iOS simulator device (see `wtx sim`)
+        #[arg(long)]
+        sim: bool,
+        /// Device type for --sim, e.g. "iPhone 16 Pro" (implies --sim)
+        #[arg(long)]
+        sim_device: Option<String>,
     },
     /// Run a command inside a VM (exit code is passed through; use bash -c '...' for shell syntax)
     Exec {
@@ -101,6 +108,41 @@ enum Cmd {
         #[arg(default_value = "status")]
         action: String,
     },
+    /// Print the VM name for the current worktree (composable: wtx exec "$(wtx which)" ...)
+    Which,
+    /// Per-worktree iOS simulator: device lifecycle, port wiring, agent env vars
+    Sim {
+        #[command(subcommand)]
+        action: Option<SimCmd>,
+    },
+}
+
+/// NAME はすべて省略可能で、省略時はカレントディレクトリの worktree から解決する。
+#[derive(Subcommand)]
+enum SimCmd {
+    /// Create the worktree's simulator device (idempotent; also heals a deleted device)
+    Up {
+        name: Option<String>,
+        /// Device type, e.g. "iPhone 16 Pro" (default: newest iPhone of the newest runtime)
+        #[arg(long)]
+        device: Option<String>,
+    },
+    /// Show device state and forward liveness
+    Status {
+        name: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Allocate a host port for a guest port and start the forward (idempotent): LABEL:GUESTPORT
+    Wire { spec: String, name: Option<String> },
+    /// Print eval-able env (WTX_SIM_UDID, WTX_PORT_*...); re-arms dead forwards
+    Env {
+        name: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete the simulator device (the VM stays)
+    Rm { name: Option<String> },
 }
 
 fn main() {
@@ -124,11 +166,11 @@ fn run() -> Result<()> {
                 tui::run()
             }
         }
-        Some(Cmd::Up { name, workdir, mounts, memory, cpus, disk, from, no_claude, no_clone }) => {
+        Some(Cmd::Up { name, workdir, mounts, memory, cpus, disk, from, no_claude, no_clone, sim, sim_device }) => {
             lima::up(
                 &name,
                 &workdir,
-                lima::UpOpts { memory, cpus, disk, from, no_claude, no_clone, extra_mounts: mounts },
+                lima::UpOpts { memory, cpus, disk, from, no_claude, no_clone, extra_mounts: mounts, sim, sim_device },
             )
         }
         Some(Cmd::Exec { name, workdir, cmd }) => sshx::exec(&name, workdir.as_deref(), &cmd),
@@ -151,6 +193,16 @@ fn run() -> Result<()> {
                 Ok(())
             }
         },
+        Some(Cmd::Which) => sim::which(),
+        Some(Cmd::Sim { action }) => {
+            match action.unwrap_or(SimCmd::Status { name: None, json: false }) {
+                SimCmd::Up { name, device } => sim::up(name.as_deref(), device.as_deref()),
+                SimCmd::Status { name, json } => sim::status(name.as_deref(), json),
+                SimCmd::Wire { spec, name } => sim::wire(name.as_deref(), &spec),
+                SimCmd::Env { name, json } => sim::env(name.as_deref(), json),
+                SimCmd::Rm { name } => sim::rm(name.as_deref()),
+            }
+        }
         Some(Cmd::Mirror { action }) => match action.as_str() {
             "serve" => mirror::serve(),
             "up" => mirror::up(),

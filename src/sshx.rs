@@ -86,6 +86,10 @@ pub fn shell(name: &str) -> Result<()> {
 
 /// forward: ホスト A → VM B (ssh -L) / bridge: VM A → ホスト B (ssh -R)
 pub fn forward(name: &str, spec: &str, reverse: bool) -> Result<()> {
+    forward_impl(name, spec, reverse, false)
+}
+
+fn forward_impl(name: &str, spec: &str, reverse: bool, quiet: bool) -> Result<()> {
     let (a, b) = spec
         .split_once(':')
         .ok_or_else(|| anyhow!("port spec must be A:B"))?;
@@ -110,9 +114,47 @@ pub fn forward(name: &str, spec: &str, reverse: bool) -> Result<()> {
     if !st.success() {
         return Err(anyhow!("ssh {flag} failed"));
     }
-    let kind = if reverse { "bridge" } else { "forward" };
-    println!("{kind} {spec} active (stop: wtx unforward {name} {a})");
+    if !quiet {
+        let kind = if reverse { "bridge" } else { "forward" };
+        println!("{kind} {spec} active (stop: wtx unforward {name} {a})");
+    }
     Ok(())
+}
+
+/// forward の ssh マスターが生きているか（`-O check`）。
+/// VM停止でマスターは自然終了しソケットも消えるのが通常だが、異常終了で残ることはある。
+pub fn master_alive(name: &str, host_port: u16) -> bool {
+    let sock = wtx_home().join(format!("{name}-{host_port}.sock"));
+    if !sock.exists() {
+        return false;
+    }
+    Command::new("ssh")
+        .args(["-S", &sock.to_string_lossy(), "-O", "check", &format!("lima-{name}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// 死んでいれば張り直す冪等 forward。`sim env` の再armに使うため stdout を汚さない。
+pub fn ensure_forward(name: &str, host: u16, guest: u16) -> Result<()> {
+    if master_alive(name, host) {
+        return Ok(());
+    }
+    drop_forward(name, host); // 残骸ソケットの掃除（無ければ何もしない）
+    forward_impl(name, &format!("{host}:{guest}"), false, true)
+}
+
+/// forward を畳む（出力なし）。ソケットが無ければ何もしない。
+pub fn drop_forward(name: &str, host_port: u16) {
+    let sock = wtx_home().join(format!("{name}-{host_port}.sock"));
+    let _ = Command::new("ssh")
+        .args(["-S", &sock.to_string_lossy(), "-O", "exit", &format!("lima-{name}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = std::fs::remove_file(&sock);
 }
 
 pub fn unforward(name: &str, port: &str) -> Result<()> {

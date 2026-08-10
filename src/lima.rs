@@ -25,6 +25,20 @@ pub struct InstanceMeta {
     /// `wtx up --from` の clone 元（来歴。空なら通常作成）
     #[serde(default)]
     pub seeded_from: String,
+    /// worktree 専用シミュレータのUDID（wtx sim。空なら未作成）
+    #[serde(default)]
+    pub sim_udid: String,
+    #[serde(default)]
+    pub sim_devicetype: String,
+    /// `wtx sim wire` の割り当て（label → host/guest）。`sim env` が再armに使う
+    #[serde(default)]
+    pub ports: std::collections::BTreeMap<String, PortMap>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortMap {
+    pub host: u16,
+    pub guest: u16,
 }
 
 pub fn meta_path(name: &str) -> PathBuf {
@@ -35,6 +49,11 @@ pub fn load_meta(name: &str) -> Option<InstanceMeta> {
     serde_json::from_str(&std::fs::read_to_string(meta_path(name)).ok()?).ok()
 }
 
+pub fn save_meta(name: &str, meta: &InstanceMeta) -> Result<()> {
+    std::fs::write(meta_path(name), serde_json::to_string_pretty(meta)?)?;
+    Ok(())
+}
+
 pub struct UpOpts {
     pub memory: Option<String>,
     pub cpus: Option<u32>,
@@ -43,6 +62,8 @@ pub struct UpOpts {
     pub no_claude: bool,
     pub no_clone: bool,
     pub extra_mounts: Vec<String>,
+    pub sim: bool,
+    pub sim_device: Option<String>,
 }
 
 fn render_yaml(mounts: &[Mount], cpus: u32, memory: &str, disk: &str, path: &Path) -> Result<()> {
@@ -323,9 +344,14 @@ pub fn up(name: &str, workdir: &str, o: UpOpts) -> Result<()> {
         limactl(&["start", "--name", name, "--tty=false", &yaml.to_string_lossy()])?;
     }
 
+    // 再アタッチではシミュレータ・ポート割り当てを引き継ぐ（メタは毎回書き直すため）。
+    let prev = load_meta(name).unwrap_or_default();
     let mut meta = InstanceMeta {
         workdir: workdir.to_string_lossy().into_owned(),
-        seeded_from: o.from.clone().unwrap_or_default(),
+        seeded_from: o.from.clone().unwrap_or(prev.seeded_from),
+        sim_udid: prev.sim_udid,
+        sim_devicetype: prev.sim_devicetype,
+        ports: prev.ports,
         ..Default::default()
     };
     if let Some(r) = &repo {
@@ -362,7 +388,29 @@ if [ ! -L "$HOME/.claude" ]; then rm -rf "$HOME/.claude"; ln -s "$H" "$HOME/.cla
             eprintln!("wtx: warning: could not link ~/.claude in the VM: {e}");
         }
     }
-    std::fs::write(meta_path(name), serde_json::to_string_pretty(&meta)?)?;
+    // --from: clone 元にシミュレータがあれば、アプリ・データごと複製して引き継ぐ。
+    // ポートは label:guest の定義だけ引き継ぎ、ホスト側は新規に払い出す
+    // （clone 元と同じホストポートは共存できない）。
+    if meta.sim_udid.is_empty() {
+        if let Some(src_meta) = o.from.as_deref().and_then(load_meta) {
+            if !src_meta.sim_udid.is_empty() {
+                match crate::sim::clone_device(&src_meta.sim_udid, name) {
+                    Ok(udid) => {
+                        meta.sim_udid = udid;
+                        meta.sim_devicetype = src_meta.sim_devicetype.clone();
+                        meta.ports = crate::sim::inherit_ports(&src_meta.ports);
+                    }
+                    Err(e) => eprintln!("wtx: warning: simulator not cloned: {e}"),
+                }
+            }
+        }
+    }
+    if o.sim || o.sim_device.is_some() {
+        if let Err(e) = crate::sim::ensure_device(name, &mut meta, o.sim_device.as_deref()) {
+            eprintln!("wtx: warning: simulator not created: {e}");
+        }
+    }
+    save_meta(name, &meta)?;
 
     println!("ready:\n  wtx shell {name}\n  wtx rm {name}");
     Ok(())
@@ -385,6 +433,11 @@ pub fn rm(name: &str, with_worktree: bool) -> Result<()> {
         }
     }
     crate::sshx::close_all_forwards(name);
+    if let Some(m) = &meta {
+        if !m.sim_udid.is_empty() {
+            crate::sim::delete_device(&m.sim_udid);
+        }
+    }
     limactl(&["delete", "-f", name])?;
     let _ = std::fs::remove_file(wtx_home().join(format!("{name}.yaml")));
     let _ = std::fs::remove_file(meta_path(name));
@@ -451,15 +504,26 @@ pub fn ls() {
         pad("STATUS", 10),
         pad("BRANCH", 16)
     );
+    // シミュレータ状態は sim を使うVMがあるときだけ問い合わせる（xcrun 無し環境を巻き込まない）
+    let sim_states = crate::sim::states_for(
+        &rows.iter().filter(|i| !i.sim_udid.is_empty()).map(|i| i.sim_udid.clone()).collect::<Vec<_>>(),
+    );
     for i in &rows {
-        let suffix = if i.orphaned { "  (orphaned: workdir gone)" } else { "" };
+        let orphan = if i.orphaned { "  (orphaned: workdir gone)" } else { "" };
+        let sim = if i.sim_udid.is_empty() {
+            String::new()
+        } else {
+            let st = sim_states.get(&i.sim_udid).map(String::as_str).unwrap_or("missing");
+            format!("  sim:{st}")
+        };
         println!(
-            "{}{}{}{}{}",
+            "{}{}{}{}{}{}",
             pad(&i.name, 24),
             pad(&i.status, 10),
             pad(&i.branch, 16),
             i.workdir,
-            suffix
+            sim,
+            orphan
         );
     }
     if rows.iter().any(|i| i.orphaned) {
@@ -478,6 +542,8 @@ pub struct Instance {
     pub repo: String,
     /// worktree が消えているVM。コミットはホストにあるので消しても作業は失われない。
     pub orphaned: bool,
+    /// worktree 専用シミュレータのUDID（空なら未作成）。
+    pub sim_udid: String,
 }
 
 pub fn list_instances() -> Vec<Instance> {
@@ -493,6 +559,7 @@ pub fn list_instances() -> Vec<Instance> {
                 orphaned: !workdir.is_empty() && !Path::new(&workdir).exists(),
                 workdir: meta.as_ref().map(|m| m.workdir.clone()).unwrap_or_default(),
                 branch: meta.as_ref().map(|m| m.branch.clone()).unwrap_or_default(),
+                sim_udid: meta.as_ref().map(|m| m.sim_udid.clone()).unwrap_or_default(),
                 repo: meta.map(|m| m.main_repo).unwrap_or_default(),
             })
         })

@@ -1,6 +1,6 @@
 [package]
 name = "wtx"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 authors = ["Raku Sakaguchi <rakutek12@gmail.com>"]
 description = "worktree×コーディングエージェント並列開発ツール: worktreeごとの独立VM (Lima/vz) + VM内dockerd、--fromでDB・イメージごと環境を引き継ぐ"

@@ -7,12 +7,16 @@ description: >-
   shared with the host: commits made in a VM land directly on the host branch
   and `git push` works from inside. A new worktree VM can be seeded from an
   existing one (`wtx up --from`: DB volumes, images and installed tools carry
-  over). wtx is a convenience tool, NOT a security sandbox — do not use it to
-  contain untrusted code. Use when the user says "wtx", "worktreeごとにVM",
-  "worktreeごとにDB", "DBを引き継いでworktreeを生やす", "VM内でdocker",
+  over). Each worktree can also get a dedicated iOS simulator device on the
+  host (`wtx sim`): its lifecycle follows the VM and agents address it via
+  `eval "$(wtx sim env)"` → $WTX_SIM_UDID / $WTX_PORT_*. wtx is a convenience
+  tool, NOT a security sandbox — do not use it to contain untrusted code. Use
+  when the user says "wtx", "worktreeごとにVM", "worktreeごとにDB",
+  "DBを引き継いでworktreeを生やす", "VM内でdocker",
   "VM内でエージェントを走らせる", "ゴールデンVM",
-  "レジストリミラー / pull-throughキャッシュ", or wants parallel agents each
-  with their own database and ports. Boundary: use orca-cli when the task is
+  "レジストリミラー / pull-throughキャッシュ", "worktreeごとにシミュレータ",
+  "worktree専用シミュレータ", or wants parallel agents each with their own
+  database, ports and iOS simulator. Boundary: use orca-cli when the task is
   about Orca-managed worktrees/terminals/handoffs (Orca can call wtx from its
   terminals); use plain `git worktree` when no per-worktree VM/docker is
   needed.
@@ -106,6 +110,34 @@ wtx unforward NAME 8080       # 解除
 
 **forward と bridge で SPEC の順序が逆**（forward=HOST:GUEST、bridge=GUEST:HOST）。
 間違えやすいので必ず上の対応で書く。
+
+## worktree専用 iOS シミュレータ（wtx sim）
+
+iOSアプリを含むリポジトリでは、worktreeごとに専用のシミュレータデバイスを持てる
+（`wtx up --sim` または `wtx sim up`）。デバイスは**ホスト側**にあり、寿命はVMと連動する
+（`wtx rm` / `prune` で一緒に消え、`--from` ではアプリ・データごとcloneされる）。
+
+このworktreeでシミュレータを使うときは、次を守ること:
+
+- セッション開始時に worktree ディレクトリで `eval "$(wtx sim env)"` を実行する。
+  ポートやUDIDは変わりうるので、セッションをまたいで値をキャッシュしない
+- シミュレータは `$WTX_SIM_UDID` のデバイス**だけ**を使う。他のデバイスを作成・起動・削除しない
+- ビルド: `xcodebuild -destination "id=$WTX_SIM_UDID" -derivedDataPath .wtx-derived ...`
+- 起動前に boot: デバイスは Shutdown で作られ、そのままでは launch が
+  `SimError 405` になる。`xcrun simctl boot "$WTX_SIM_UDID" && xcrun simctl bootstatus "$WTX_SIM_UDID" -b`
+  で起動を待つ（自分のデバイスの boot はこの節の禁止事項に含まれない）
+- 起動: `SIMCTL_CHILD_API_BASE_URL="http://127.0.0.1:$WTX_PORT_API" xcrun simctl launch "$WTX_SIM_UDID" <bundle-id>`
+  （`WTX_PORT_<LABEL>` は `wtx sim wire <label>:<VM内ポート>` で払い出したホストポート）
+- 操作: orca が使えるなら `orca emulator attach "$WTX_SIM_UDID" --worktree "path:$PWD"`、
+  無ければ `xcrun simctl` を直接使う。wtx に操作コマンドは無い
+- VM側（db・api・docker）の作業は `wtx exec "$(wtx which)" ...`（`wtx which` は
+  カレントディレクトリからVM名を解決する。`wtx sim` 系も NAME 省略で同じ解決が効く）
+- シミュレータ操作は**ホスト側でだけ**可能。VM内シェル（`wtx shell` の中）に simctl は
+  存在しないので、VM内で頼まれたら実行せずその旨を報告する
+
+`wtx sim env` は死んだ forward（VM再起動後など）を自動で張り直すので、
+接続できないときはまず `eval "$(wtx sim env)"` を再実行する。状態確認は
+`wtx sim status`（`--json` あり）。
 
 ## image / mirror の ACTION（`--help` に出ないので暗記対象）
 
