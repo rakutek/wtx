@@ -79,6 +79,12 @@ wtxは何にも依存しない。連携はすべて汎用インターフェー�
   ホストのブランチは動かないので、ホスト側 `git status` にはVMの変更が未コミットとして見える。
   回収は `wtx sync` → `git merge --ff-only refs/wtx/<name>/<branch>`
 - VMを削除するとVMローカルのコミットも消える。`wtx rm` の前に `wtx sync` すること
+- 通常リポジトリ（非worktree）モードでは、VM起動直後に `wtx-gitmount.service` が bind を張り直すまでの
+  ごく短い間だけホストの `.git` がVMから書き込み可能になる。worktree モードは Lima のマウント自体が
+  ro なのでこの窓は無い
+- launchd の plist にはビルド成果物の絶対パス（`target/release/wtx`）が焼かれる。`cargo clean` すると
+  ミラーが起動しなくなるので `wtx mirror install` を再実行する。`~/.wtx/mirrors.json` を編集した場合も
+  ソケット一覧を作り直すため再実行が必要
 
 ## 既知の制約 / TODO
 
