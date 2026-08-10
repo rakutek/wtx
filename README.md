@@ -1,11 +1,11 @@
 # wtx
 
-git worktree ごとに隔離VM（Lima/vz microVM）＋VM内専用dockerdを与えるGo製CLI。
+git worktree ごとに隔離VM（Lima/vz microVM）＋VM内専用dockerdを与えるRust製CLI／TUI。
 Docker Sandboxes のOSS代替（Dockerアカウント・ライセンス・Docker Desktop不要）。
 全メカニズムの実機検証記録は `../myapp/VERIFICATION.md`。
 
 ```
-brew install lima && go build -o wtx .
+brew install lima && cargo build --release
 wtx mirror install                                 # 任意: レジストリキャッシュ（launchdオンデマンド）
 wtx image build                                    # 初回のみ: ゴールデンVM（3〜4分）
 wtx up myapp-feature-a ~/repos/myapp-feature-a     # 以後のVM作成は約8秒
@@ -13,7 +13,25 @@ wtx exec myapp-feature-a -w ~/repos/myapp-feature-a docker compose up -d --wait
 wtx shell myapp-feature-a                          # 中でclaudeも使える
 wtx sync myapp-feature-a                           # コミットをホストへ回収
 wtx rm myapp-feature-a
+wtx                                                # 引数なしで ratatui コンソール
 ```
+
+## TUI コンソール（`wtx` / `wtx tui`）
+
+VM一覧・状態・隔離gitの有無・ミラーの稼働状況を1画面で見て操作する。
+
+```
+ wtx   mirror[launchd]  ●docker.io  ●ghcr.io  ●quay.io  ●registry.k8s.io
+┌ VMs ──────────────────────────────────────────────────────────────────┐
+│  NAME                STATUS    GIT    BRANCH      WORKDIR             │
+│▶ myapp-feature-e     Running   隔離   feature-e   ~/repos/myapp-...   │
+│  wtx-golden          Stopped   -                                      │
+└───────────────────────────────────────────────────────────────────────┘
+r:更新  s:起動/停止  y:sync  Enter:shell  d:削除  q:終了
+```
+
+`Enter` は TUI を畳んでVM内シェルに入り、抜けると復帰する。`--snapshot` を付けると
+tty なしで1フレームだけ描画して終了する（動作確認用）。
 
 ## 設計
 
@@ -34,11 +52,14 @@ wtx rm myapp-feature-a
 - **エージェント認証**: `wtx up` 時にホストの `~/.claude/.credentials.json` を**コピー**（`--no-claude` で無効）。
   マウントにしない理由: `~/.claude` を rw 共有すると VM 内エージェントがホストの settings.json（hooks等）を
   書き換えられ、隔離が破れるため
-- **内蔵レジストリキャッシュ**: distribution ライブラリを内蔵し、Docker 不要で pull-through キャッシュを提供。
+- **内蔵レジストリキャッシュ**: pull-through キャッシュを自前実装（Docker 不要）。
+  blob は digest で不変なのでディスクにキャッシュし、manifest は tag が動くので常に上流へ問い合わせる
+  （キャッシュ不整合を構造的に排除）。上流の 401 は `WWW-Authenticate` を解釈してトークンを取得するので、
+  docker.io だけでなく ghcr.io / quay.io なども同じ仕組みで配信できる。
   `wtx mirror install` で **launchd ソケットアクティベーション**（常駐プロセスなし。pull が来た瞬間に起動し、
-  10分アイドルで終了）。docker.io は dockerd の `registry-mirrors`、**ghcr.io / quay.io / registry.k8s.io は
-  containerd の `certs.d`** 経由で透過的にキャッシュされる（Docker 29 で動作確認）。
-  対象と待受ポートは `~/.wtx/mirrors.json` で変更可能。ミラーが落ちていても上流直行にフォールバックする
+  10分アイドルで終了）。対象と待受ポートは `~/.wtx/mirrors.json` で変更可能。
+  ミラーが落ちていても上流直行にフォールバックする。
+  **透過的に効くのは docker.io のみ**（後述）
 - **ポート**: Limaの自動フォワードは全無効化。複数VMが各自の `localhost:5432` を同時に持てる。
   公開は `wtx forward`（ssh -L）、ホスト常駐サービスへの逆方向は `wtx bridge`（ssh -R）
 - **読み取り専用VM**: 追加マウントに `:ro` でreviewer用（書き込みはFSレベルで拒否）
@@ -61,6 +82,13 @@ wtxは何にも依存しない。連携はすべて汎用インターフェー�
 
 ## 既知の制約 / TODO
 
+- **非 Docker Hub レジストリの透過キャッシュは不可（Docker側の制約）**。
+  Docker Engine 29 の `registry-mirrors` は Hub 専用で、containerd の
+  `/etc/containerd/certs.d/<registry>/hosts.toml` を置いても、システム containerd に切り替えて
+  transfer プラグインへ `config_path` を与えても、ghcr.io の pull はミラーに来ないことを
+  アクセスログで確認済み（`wtx up` は certs.d を書くので、Docker 側が対応すれば自動で効く）。
+  wtx のミラー自体は ghcr/quay でも正常に配信できるので、明示的に
+  `docker pull localhost:5002/<org>/<image>` の形なら現時点でも利用できる
 - ゴールデンVMには mirrors 設定が焼き込まれる（`wtx up` 時に certs.d は再適用されるが、
   `daemon.json` の Hub ミラーポートを変えた場合は `wtx image rm && wtx image build` が必要）
 - `wtx exec` はシェル構文を解釈しない（安全なargv素通し）。パイプ等は `bash -c '...'` で渡す

@@ -63,6 +63,22 @@ impl App {
     }
 }
 
+/// tty のない環境でも描画を確認できるスナップショット（CI・動作確認用）。
+pub fn snapshot() -> Result<()> {
+    let mut term = Terminal::new(ratatui::backend::TestBackend::new(100, 18))?;
+    let mut app = App::new();
+    term.draw(|f| draw(f, &mut app))?;
+    let buf = term.backend().buffer().clone();
+    for y in 0..buf.area.height {
+        let mut line = String::new();
+        for x in 0..buf.area.width {
+            line.push_str(buf[(x, y)].symbol());
+        }
+        println!("{}", line.trim_end());
+    }
+    Ok(())
+}
+
 pub fn run() -> Result<()> {
     enable_raw_mode()?;
     let mut out = std::io::stdout();
@@ -176,7 +192,7 @@ fn draw(f: &mut Frame, app: &mut App) {
     let chunks = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(5),
-        Constraint::Length(4),
+        Constraint::Length(5),
         Constraint::Length(1),
     ])
     .split(f.area());

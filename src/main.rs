@@ -56,7 +56,11 @@ enum Cmd {
     /// VM一覧
     Ls,
     /// ratatui コンソールを開く
-    Tui,
+    Tui {
+        /// tty を使わず1フレームだけ描画して終了する（動作確認用）
+        #[arg(long)]
+        snapshot: bool,
+    },
     /// VM内のコミットを refs/wtx/<name>/* としてホストへ回収する
     Sync { name: String },
     /// VMのポートをホストに公開する (ssh -L) HOST:GUEST
@@ -92,7 +96,13 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         None => tui::run(),
-        Some(Cmd::Tui) => tui::run(),
+        Some(Cmd::Tui { snapshot }) => {
+            if snapshot {
+                tui::snapshot()
+            } else {
+                tui::run()
+            }
+        }
         Some(Cmd::Up { name, workdir, mounts, memory, cpus, disk, share_git, no_claude, no_clone }) => {
             lima::up(
                 &name,
