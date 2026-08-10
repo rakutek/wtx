@@ -2,7 +2,10 @@
 name = "wtx"
 version = "0.2.0"
 edition = "2021"
+authors = ["Raku Sakaguchi <rakutek12@gmail.com>"]
 description = "worktreeごとの隔離VM (Lima/vz) + VM内dockerd + 内蔵レジストリキャッシュ"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rakutek/wtx"
 
 [dependencies]
 anyhow = "1"

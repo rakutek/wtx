@@ -136,3 +136,14 @@ wtxは何にも依存しない。連携はすべて汎用インターフェー�
 - 資格情報コピーはトークンのスナップショット。VM側でのOAuthリフレッシュがホスト側セッションと
   競合する可能性は未検証
 - ミラーのキャッシュ削除（GC）は未実装。`~/.wtx/mirror-cache` を手動で消す
+
+## ライセンス
+
+以下のいずれかのライセンスを選択して利用できる（デュアルライセンス）:
+
+- Apache License, Version 2.0（[LICENSE-APACHE](LICENSE-APACHE) または http://www.apache.org/licenses/LICENSE-2.0）
+- MIT License（[LICENSE-MIT](LICENSE-MIT) または http://opensource.org/licenses/MIT）
+
+特に明示しない限り、このリポジトリへ意図的に提出されたコントリビューションは
+（Apache-2.0 ライセンスの定義に従い）追加の条件なく上記のデュアルライセンスで
+提供されたものとみなす。
