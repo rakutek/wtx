@@ -237,6 +237,8 @@ pub struct Instance {
     pub workdir: String,
     pub branch: String,
     pub isolated: bool,
+    /// プロジェクト（ホスト側リポジトリルート）。TUI のグループ化キー。
+    pub repo: String,
 }
 
 pub fn list_instances() -> Vec<Instance> {
@@ -250,6 +252,7 @@ pub fn list_instances() -> Vec<Instance> {
                 status: status.to_string(),
                 workdir: meta.as_ref().map(|m| m.workdir.clone()).unwrap_or_default(),
                 branch: meta.as_ref().map(|m| m.branch.clone()).unwrap_or_default(),
+                repo: meta.as_ref().map(|m| m.main_repo.clone()).unwrap_or_default(),
                 isolated: meta.map(|m| m.isolated).unwrap_or(false),
             })
         })

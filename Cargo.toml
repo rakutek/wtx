@@ -15,6 +15,7 @@ reqwest = { version = "0.12", default-features = false, features = ["stream", "j
 futures-util = "0.3"
 tokio-util = { version = "0.7", features = ["io"] }
 ratatui = "0.29"
+unicode-width = "0.2"
 crossterm = "0.28"
 dirs = "6"
 libc = "0.2"

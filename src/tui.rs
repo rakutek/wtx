@@ -1,4 +1,5 @@
-//! ratatui コンソール: VM一覧・状態・ミラーを一画面で見て操作する。
+//! ratatui コンソール: VMをプロジェクト（ホスト側リポジトリ）ごとにまとめて表示し、
+//! 起動/停止・sync・削除・シェル起動を1画面で操作する。
 use crate::lima::{self, Instance};
 use crate::mirror;
 use anyhow::Result;
@@ -8,24 +9,35 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use std::collections::{BTreeMap, HashSet};
 use std::time::{Duration, Instant};
 
+/// プロジェクト見出しか、その配下のVMか。
+enum Row {
+    Group { key: String, vms: usize, running: usize },
+    Vm(Instance),
+}
+
 struct App {
-    rows: Vec<Instance>,
-    state: TableState,
+    rows: Vec<Row>,
+    collapsed: HashSet<String>,
+    state: ListState,
     status: String,
     confirm_delete: bool,
     mirror_line: String,
     last_refresh: Instant,
 }
 
+const HELP: &str = "r:更新  s:起動/停止  y:sync  Enter:shell/開閉  Space:開閉  d:削除  q:終了";
+
 impl App {
     fn new() -> Self {
         let mut a = App {
             rows: vec![],
-            state: TableState::default(),
-            status: "r:更新  s:起動/停止  y:sync  Enter:shell  d:削除  q:終了".into(),
+            collapsed: HashSet::new(),
+            state: ListState::default(),
+            status: HELP.into(),
             confirm_delete: false,
             mirror_line: String::new(),
             last_refresh: Instant::now(),
@@ -36,7 +48,29 @@ impl App {
     }
 
     fn refresh(&mut self) {
-        self.rows = lima::list_instances();
+        // プロジェクト（main_repo）ごとにまとめ、リポジトリを持たないVMは最後に置く
+        let mut groups: BTreeMap<String, Vec<Instance>> = BTreeMap::new();
+        for i in lima::list_instances() {
+            groups.entry(i.repo.clone()).or_default().push(i);
+        }
+        let mut keys: Vec<String> = groups.keys().cloned().collect();
+        keys.sort_by_key(|k| (k.is_empty(), k.clone()));
+
+        self.rows.clear();
+        for k in keys {
+            let mut vms = groups.remove(&k).unwrap_or_default();
+            vms.sort_by(|a, b| a.name.cmp(&b.name));
+            let running = vms.iter().filter(|v| v.status == "Running").count();
+            self.rows.push(Row::Group { key: k.clone(), vms: vms.len(), running });
+            if !self.collapsed.contains(&k) {
+                self.rows.extend(vms.into_iter().map(Row::Vm));
+            }
+        }
+        if let Some(sel) = self.state.selected() {
+            if sel >= self.rows.len() {
+                self.state.select(self.rows.len().checked_sub(1));
+            }
+        }
         let mode = if crate::launchd::installed() { "launchd" } else { "手動" };
         let up: Vec<String> = mirror::mirror_config()
             .into_iter()
@@ -49,8 +83,15 @@ impl App {
         self.last_refresh = Instant::now();
     }
 
-    fn selected(&self) -> Option<&Instance> {
+    fn selected_row(&self) -> Option<&Row> {
         self.state.selected().and_then(|i| self.rows.get(i))
+    }
+
+    fn selected_vm(&self) -> Option<&Instance> {
+        match self.selected_row() {
+            Some(Row::Vm(i)) => Some(i),
+            _ => None,
+        }
     }
 
     fn move_sel(&mut self, delta: isize) {
@@ -60,6 +101,19 @@ impl App {
         let i = self.state.selected().unwrap_or(0) as isize + delta;
         let i = i.clamp(0, self.rows.len() as isize - 1) as usize;
         self.state.select(Some(i));
+    }
+
+    /// 見出し行なら開閉する。VM行なら false を返す。
+    fn toggle_group(&mut self) -> bool {
+        let Some(Row::Group { key, .. }) = self.selected_row() else {
+            return false;
+        };
+        let key = key.clone();
+        if !self.collapsed.remove(&key) {
+            self.collapsed.insert(key);
+        }
+        self.refresh();
+        true
     }
 }
 
@@ -107,24 +161,20 @@ fn event_loop<B: Backend + std::io::Write>(term: &mut Terminal<B>) -> Result<()>
             continue;
         }
         if app.confirm_delete {
-            match k.code {
-                KeyCode::Char('y') => {
-                    if let Some(name) = app.selected().map(|i| i.name.clone()) {
-                        app.status = format!("{name} を削除中...");
-                        term.draw(|f| draw(f, &mut app))?;
-                        app.status = match lima::rm(&name) {
-                            Ok(_) => format!("{name} を削除しました"),
-                            Err(e) => format!("削除失敗: {e}"),
-                        };
-                        app.refresh();
-                    }
-                    app.confirm_delete = false;
+            if k.code == KeyCode::Char('y') {
+                if let Some(name) = app.selected_vm().map(|i| i.name.clone()) {
+                    app.status = format!("{name} を削除中...");
+                    term.draw(|f| draw(f, &mut app))?;
+                    app.status = match lima::rm(&name) {
+                        Ok(_) => format!("{name} を削除しました"),
+                        Err(e) => format!("削除失敗: {e}"),
+                    };
+                    app.refresh();
                 }
-                _ => {
-                    app.confirm_delete = false;
-                    app.status = "キャンセルしました".into();
-                }
+            } else {
+                app.status = "キャンセルしました".into();
             }
+            app.confirm_delete = false;
             continue;
         }
         match k.code {
@@ -135,15 +185,21 @@ fn event_loop<B: Backend + std::io::Write>(term: &mut Terminal<B>) -> Result<()>
             }
             KeyCode::Down | KeyCode::Char('j') => app.move_sel(1),
             KeyCode::Up | KeyCode::Char('k') => app.move_sel(-1),
+            KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right => {
+                app.toggle_group();
+            }
             KeyCode::Char('d') => {
-                if app.selected().is_some() {
+                if app.selected_vm().is_some() {
                     app.confirm_delete = true;
+                } else {
+                    app.status = "VMを選んでください".into();
                 }
             }
             KeyCode::Char('s') => {
-                if let Some(inst) = app.selected().cloned() {
+                if let Some(inst) = app.selected_vm().cloned() {
                     let running = inst.status == "Running";
-                    app.status = format!("{} を{}中...", inst.name, if running { "停止" } else { "起動" });
+                    app.status =
+                        format!("{} を{}中...", inst.name, if running { "停止" } else { "起動" });
                     term.draw(|f| draw(f, &mut app))?;
                     let r = if running {
                         crate::util::limactl(&["stop", &inst.name])
@@ -155,20 +211,27 @@ fn event_loop<B: Backend + std::io::Write>(term: &mut Terminal<B>) -> Result<()>
                         Err(e) => format!("失敗: {e}"),
                     };
                     app.refresh();
+                } else {
+                    app.status = "VMを選んでください".into();
                 }
             }
             KeyCode::Char('y') => {
-                if let Some(name) = app.selected().map(|i| i.name.clone()) {
+                if let Some(name) = app.selected_vm().map(|i| i.name.clone()) {
                     app.status = format!("{name} を sync 中...");
                     term.draw(|f| draw(f, &mut app))?;
                     app.status = match lima::sync(&name) {
                         Ok(_) => format!("{name}: refs/wtx/{name}/* に回収しました"),
                         Err(e) => format!("sync 失敗: {e}"),
                     };
+                } else {
+                    app.status = "VMを選んでください".into();
                 }
             }
             KeyCode::Enter => {
-                if let Some(name) = app.selected().map(|i| i.name.clone()) {
+                if app.toggle_group() {
+                    continue;
+                }
+                if let Some(name) = app.selected_vm().map(|i| i.name.clone()) {
                     // TUI を一旦畳んで対話シェルに入る
                     disable_raw_mode()?;
                     execute!(term.backend_mut(), LeaveAlternateScreen)?;
@@ -191,6 +254,7 @@ fn event_loop<B: Backend + std::io::Write>(term: &mut Terminal<B>) -> Result<()>
 fn draw(f: &mut Frame, app: &mut App) {
     let chunks = Layout::vertical([
         Constraint::Length(1),
+        Constraint::Length(1),
         Constraint::Min(5),
         Constraint::Length(5),
         Constraint::Length(1),
@@ -205,73 +269,104 @@ fn draw(f: &mut Frame, app: &mut App) {
         ])),
         chunks[0],
     );
+    f.render_widget(
+        Paragraph::new(format!(
+            "    {:<24}{:<10}{:<8}{}",
+            "NAME", "STATUS", "GIT", "BRANCH"
+        ))
+        .style(Style::new().bold().fg(Color::Yellow)),
+        chunks[1],
+    );
 
-    let header = Row::new(vec!["NAME", "STATUS", "GIT", "BRANCH", "WORKDIR"])
-        .style(Style::new().bold().fg(Color::Yellow));
-    let rows: Vec<Row> = app
+    let items: Vec<ListItem> = app
         .rows
         .iter()
-        .map(|i| {
-            let color = match i.status.as_str() {
-                "Running" => Color::Green,
-                "Stopped" => Color::DarkGray,
-                _ => Color::Yellow,
-            };
-            let git = if i.isolated { "隔離" } else if i.workdir.is_empty() { "-" } else { "共有" };
-            Row::new(vec![
-                Cell::from(i.name.clone()),
-                Cell::from(i.status.clone()).style(Style::new().fg(color)),
-                Cell::from(git),
-                Cell::from(i.branch.clone()),
-                Cell::from(compact_path(&i.workdir)),
-            ])
+        .map(|row| match row {
+            Row::Group { key, vms, running } => {
+                let mark = if app.collapsed.contains(key) { "▸" } else { "▾" };
+                let label = if key.is_empty() {
+                    "(プロジェクトなし)".to_string()
+                } else {
+                    format!(
+                        "{}  {}",
+                        std::path::Path::new(key)
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy(),
+                        compact_path(key)
+                    )
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("{mark} {label}"), Style::new().bold().fg(Color::Cyan)),
+                    Span::styled(
+                        format!("  [{running}/{vms} running]"),
+                        Style::new().fg(Color::DarkGray),
+                    ),
+                ]))
+            }
+            Row::Vm(i) => {
+                let color = match i.status.as_str() {
+                    "Running" => Color::Green,
+                    "Stopped" => Color::DarkGray,
+                    _ => Color::Yellow,
+                };
+                let git = if i.isolated {
+                    "隔離"
+                } else if i.workdir.is_empty() {
+                    "-"
+                } else {
+                    "共有"
+                };
+                ListItem::new(Line::from(vec![
+                    Span::raw(format!("  {}", pad(&i.name, 24))),
+                    Span::styled(pad(&i.status, 10), Style::new().fg(color)),
+                    Span::raw(format!("{}{}", pad(git, 8), i.branch)),
+                ]))
+            }
         })
         .collect();
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(24),
-            Constraint::Length(9),
-            Constraint::Length(6),
-            Constraint::Length(16),
-            Constraint::Min(20),
-        ],
-    )
-    .header(header)
-    .block(Block::default().borders(Borders::ALL).title(" VMs "))
-    .row_highlight_style(Style::new().bg(Color::Blue).fg(Color::White))
-    .highlight_symbol("▶ ");
-    f.render_stateful_widget(table, chunks[1], &mut app.state);
 
-    let detail = match app.selected() {
-        Some(i) => {
-            let meta = lima::load_meta(&i.name);
-            let repo = meta.as_ref().map(|m| m.main_repo.clone()).unwrap_or_default();
-            format!(
-                "workdir : {}\nrepo    : {}\ngit     : {}",
-                i.workdir,
-                if repo.is_empty() { "-" } else { &repo },
-                if i.isolated {
-                    "隔離git（ホストの .git は不変。回収は y キー）"
-                } else {
-                    "共有 or 非git"
-                }
-            )
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title(" VMs "))
+        .highlight_style(Style::new().bg(Color::Blue).fg(Color::White))
+        .highlight_symbol("▶");
+    f.render_stateful_widget(list, chunks[2], &mut app.state);
+
+    let detail = match app.selected_row() {
+        Some(Row::Vm(i)) => format!(
+            "workdir : {}\nrepo    : {}\ngit     : {}",
+            i.workdir,
+            if i.repo.is_empty() { "-" } else { &i.repo },
+            if i.isolated {
+                "隔離git（ホストの .git は不変。回収は y キー）"
+            } else {
+                "共有 or 非git"
+            }
+        ),
+        Some(Row::Group { key, vms, running }) => {
+            if key.is_empty() {
+                format!("リポジトリに紐づかないVM: {vms}台（{running}台稼働）")
+            } else {
+                format!(
+                    "project : {}\nVM      : {vms}台（{running}台稼働）\n新規作成: wtx up <name> <worktree>",
+                    key
+                )
+            }
         }
         None => "VMがありません。`wtx up NAME WORKDIR` で作成します".to_string(),
     };
     f.render_widget(
         Paragraph::new(detail).block(Block::default().borders(Borders::ALL).title(" detail ")),
-        chunks[2],
+        chunks[3],
     );
 
     f.render_widget(
         Paragraph::new(app.status.clone()).style(Style::new().fg(Color::DarkGray)),
-        chunks[3],
+        chunks[4],
     );
 
     if app.confirm_delete {
-        let name = app.selected().map(|i| i.name.clone()).unwrap_or_default();
+        let name = app.selected_vm().map(|i| i.name.clone()).unwrap_or_default();
         let area = centered(60, 5, f.area());
         f.render_widget(Clear, area);
         f.render_widget(
@@ -287,6 +382,12 @@ fn draw(f: &mut Frame, app: &mut App) {
             area,
         );
     }
+}
+
+/// 表示幅（全角=2）で右埋めする。`{:<n}` は文字数で数えるため、日本語ラベルで列がずれる。
+fn pad(s: &str, width: usize) -> String {
+    let w = unicode_width::UnicodeWidthStr::width(s);
+    format!("{s}{}", " ".repeat(width.saturating_sub(w)))
 }
 
 fn compact_path(p: &str) -> String {

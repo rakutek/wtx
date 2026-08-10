@@ -21,19 +21,30 @@ wtx                                                # 引数なしで ratatui コ
 
 ## TUI コンソール（`wtx` / `wtx tui`）
 
-VM一覧・状態・隔離gitの有無・ミラーの稼働状況を1画面で見て操作する。
+VMを**プロジェクト（ホスト側リポジトリ）ごとにまとめて**表示し、状態・隔離gitの有無・
+ミラーの稼働状況を1画面で見て操作する。
 
 ```
  wtx   mirror[launchd]  ●docker.io  ●ghcr.io  ●quay.io  ●registry.k8s.io
+    NAME                STATUS    GIT     BRANCH
 ┌ VMs ──────────────────────────────────────────────────────────────────┐
-│  NAME                STATUS    GIT    BRANCH      WORKDIR             │
-│▶ myapp-feature-e     Running   隔離   feature-e   ~/repos/myapp-...   │
-│  wtx-golden          Stopped   -                                      │
+│▶▾ hono-test  ~/dev/hono-test  [2/2 running]                           │
+│   books-api           Running   隔離    books-api                     │
+│   hono-dev            Running   隔離    main                          │
+│ ▾ myapp  ~/repos/myapp  [1/3 running]                                 │
+│   myapp-feature-a     Running   隔離    feature-a                     │
+│   myapp-feature-b     Stopped   隔離    feature-b                     │
+│ ▾ (プロジェクトなし)  [0/1 running]                                    │
+│   wtx-golden          Stopped   -                                     │
 └───────────────────────────────────────────────────────────────────────┘
-r:更新  s:起動/停止  y:sync  Enter:shell  d:削除  q:終了
+r:更新  s:起動/停止  y:sync  Enter:shell/開閉  Space:開閉  d:削除  q:終了
 ```
 
-`Enter` は TUI を畳んでVM内シェルに入り、抜けると復帰する。`--snapshot` を付けると
+グループ化のキーは `wtx up` 時に記録したメインリポジトリのパス。worktree を複数切っている
+プロジェクトはまとめて並び、リポジトリに紐づかないVM（ゴールデンVM など）は末尾に集まる。
+見出し行で `Space`（または `Enter` / `←` / `→`）を押すと開閉し、`[稼働数/総数]` だけが残る。
+
+`Enter` はVM行では TUI を畳んでVM内シェルに入り、抜けると復帰する。`--snapshot` を付けると
 tty なしで1フレームだけ描画して終了する（動作確認用）。
 
 ## 設計

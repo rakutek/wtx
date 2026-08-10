@@ -47,6 +47,10 @@ wtx rm NAME                            # VM削除（DB・イメージごと消�
 wtx                                    # 引数なしで ratatui コンソール
 ```
 
+- TUI はVMを**プロジェクト（`wtx up` 時に記録したメインリポジトリ）ごとにまとめて**表示する。
+  見出し行で `Space`/`Enter` を押すと開閉し、`[稼働数/総数]` の要約だけになる。
+  VM行では `s` 起動/停止、`y` sync、`d` 削除、`Enter` でシェル。
+
 - `wtx exec` は **argv 素通し**でシェル構文を解釈しない。パイプ・glob・リダイレクトは
   `wtx exec NAME bash -c '...'` の形で渡す。終了コードは素通しされる。
 - `wtx up` の主なフラグ: `--memory/--cpus/--disk`、`--share-git`（隔離git無効化・旧方式）、
