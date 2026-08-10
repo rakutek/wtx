@@ -22,19 +22,21 @@ type mount struct {
 }
 
 type vmConfig struct {
-	CPUs               int
-	Memory, Disk       string
-	MirrorPort         int
-	GitName, GitEmail  string
-	Mounts             []mount
+	CPUs              int
+	Memory, Disk      string
+	MirrorPort        int
+	GitName, GitEmail string
+	Mounts            []mount
+	Mirrors           []mirrorEntry
 }
 
 // instanceMeta は wtx up 時の判断を記録し、sync / rm が参照する。
 type instanceMeta struct {
 	Workdir  string `json:"workdir"`
-	MainRepo string `json:"main_repo,omitempty"`
+	MainRepo string `json:"main_repo,omitempty"` // 隔離git時のホスト側リポジトリ
 	Branch   string `json:"branch,omitempty"`
 	Isolated bool   `json:"isolated"`
+	KeepRefs bool   `json:"keep_refs,omitempty"` // ホストに gc 保護 ref を作ったか
 }
 
 func wtxHome() string {
@@ -56,6 +58,26 @@ func gitConfigGlobal(key, fallback string) string {
 		return fallback
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func defaultVMConfig() vmConfig {
+	return vmConfig{
+		CPUs: 2, Memory: "4GiB", Disk: "20GiB",
+		MirrorPort: mirrorPort(),
+		GitName:    gitConfigGlobal("user.name", "wtx"),
+		GitEmail:   gitConfigGlobal("user.email", "wtx@localhost"),
+		Mirrors:    mirrorConfig(),
+	}
+}
+
+func renderVMYAML(cfg vmConfig, path string) error {
+	tmpl := template.Must(template.New("vm").Funcs(template.FuncMap{"shq": shellQuote}).Parse(vmTemplate))
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return tmpl.Execute(f, cfg)
 }
 
 // splitFlags は位置引数の後ろに置かれたフラグも拾えるよう並べ替える。
@@ -81,8 +103,9 @@ func cmdUp(args []string) error {
 	memory := fs.String("memory", "4GiB", "VM memory")
 	cpus := fs.Int("cpus", 2, "VM CPUs")
 	disk := fs.String("disk", "20GiB", "VM disk")
-	shareGit := fs.Bool("share-git", false, "隔離gitを無効化し、メイン.gitをrw共有（旧方式）")
+	shareGit := fs.Bool("share-git", false, "隔離gitを無効化し、ホストの.gitをrw共有（旧方式）")
 	noClaude := fs.Bool("no-claude", false, "Claude資格情報をコピーしない")
+	noClone := fs.Bool("no-clone", false, "ゴールデンVMのcloneを使わず新規プロビジョニングする")
 	flagArgs, pos := splitFlags(args, map[string]bool{"memory": true, "cpus": true, "disk": true})
 	if err := fs.Parse(flagArgs); err != nil {
 		return err
@@ -100,25 +123,25 @@ func cmdUp(args []string) error {
 	}
 
 	if !mirrorAlive() {
-		fmt.Fprintln(os.Stderr, "wtx: warning: mirror is down — pull は Docker Hub 直行になります (wtx mirror up)")
+		fmt.Fprintln(os.Stderr, "wtx: warning: mirror is down — pull は上流に直行します (wtx mirror up)")
 	}
 
-	wt, err := parseWorktree(workdir)
+	repo, err := inspectRepo(workdir)
 	if err != nil {
 		return err
 	}
-	isolated := wt != nil && !*shareGit
+	isolated := repo != nil && !*shareGit
 
-	mounts := []mount{{Location: workdir, Writable: true}}
-	if wt != nil {
-		if isolated {
-			mounts = append(mounts, mount{Location: wt.MainGit, MountPoint: isoBaseGit, Writable: false})
-		} else {
-			mounts = append(mounts, mount{Location: wt.MainGit, Writable: true})
-		}
+	cfg := defaultVMConfig()
+	cfg.CPUs, cfg.Memory, cfg.Disk = *cpus, *memory, *disk
+	cfg.Mounts = []mount{{Location: workdir, Writable: true}}
+	if repo != nil && repo.Kind == repoWorktree {
+		// linked worktree: メインの .git は workdir の外にあるので別マウントする
+		// （隔離モードでは ro。VMローカルの .git を bind で被せる）
+		cfg.Mounts = append(cfg.Mounts, mount{Location: repo.HostGit, Writable: !isolated})
 	}
 	seen := map[string]bool{}
-	for _, m := range mounts {
+	for _, m := range cfg.Mounts {
 		seen[m.Location] = true
 	}
 	for _, m := range pos[2:] {
@@ -133,36 +156,68 @@ func cmdUp(args []string) error {
 			continue
 		}
 		seen[abs] = true
-		mounts = append(mounts, mount{Location: abs, Writable: w})
+		cfg.Mounts = append(cfg.Mounts, mount{Location: abs, Writable: w})
 	}
 
-	cfg := vmConfig{
-		CPUs: *cpus, Memory: *memory, Disk: *disk,
-		MirrorPort: mirrorPort(),
-		GitName:    gitConfigGlobal("user.name", "wtx"),
-		GitEmail:   gitConfigGlobal("user.email", "wtx@localhost"),
-		Mounts:     mounts,
-	}
-	tmpl := template.Must(template.New("vm").Funcs(template.FuncMap{"shq": shellQuote}).Parse(vmTemplate))
 	yamlPath := filepath.Join(wtxHome(), name+".yaml")
-	f, err := os.Create(yamlPath)
-	if err != nil {
-		return err
-	}
-	if err := tmpl.Execute(f, cfg); err != nil {
-		f.Close()
-		return err
-	}
-	f.Close()
-
-	if err := limactl("start", "--name", name, "--tty=false", yamlPath); err != nil {
+	if err := renderVMYAML(cfg, yamlPath); err != nil {
 		return err
 	}
 
+	if st := limaStatus(name); st != "" {
+		// 既存インスタンスへの再アタッチ（マウント構成は作成時のもの）
+		if st != "Running" {
+			if err := limactl("start", name, "--tty=false"); err != nil {
+				return err
+			}
+		}
+	} else if !*noClone && goldenUsable() {
+		// プロビジョニング済みVMを clone し、マウントだけ差し替えて起動する。
+		// clone 後の lima.yaml は解決済み形式なので、テンプレートで上書きはできない
+		// （--mount-only 経由で指定する。ゆえに全マウントはホストと同じ絶対パスに置く）。
+		cloneArgs := []string{"clone", goldenName, name,
+			"--memory", strings.TrimSuffix(cfg.Memory, "GiB"),
+			"--cpus", fmt.Sprint(cfg.CPUs)}
+		for _, m := range cfg.Mounts {
+			spec := m.Location
+			if m.Writable {
+				spec += ":w"
+			}
+			cloneArgs = append(cloneArgs, "--mount-only", spec)
+		}
+		if err := limactl(cloneArgs...); err != nil {
+			return err
+		}
+		if err := limactl("start", name, "--tty=false"); err != nil {
+			return err
+		}
+	} else {
+		if !*noClone {
+			fmt.Fprintln(os.Stderr, "wtx: ヒント: `wtx image build` でゴールデンVMを作ると以後の作成が数十秒になります")
+		}
+		if err := limactl("start", "--name", name, "--tty=false", yamlPath); err != nil {
+			return err
+		}
+	}
+
+	if err := applyMirrorConfig(name); err != nil {
+		fmt.Fprintln(os.Stderr, "wtx: warning: mirror config not applied:", err)
+	}
+
+	meta := instanceMeta{Workdir: workdir, Isolated: isolated}
 	if isolated {
-		if err := setupIsolatedGit(name, wt, workdir); err != nil {
+		meta.MainRepo, meta.Branch = repo.HostRepo, repo.Branch
+		if err := setupIsolatedGit(name, repo, workdir); err != nil {
 			return fmt.Errorf("isolated git setup: %w", err)
 		}
+		// alternates 参照中の object をホスト側 gc から守る
+		if err := pinHostObjects(repo.HostRepo, name); err != nil {
+			fmt.Fprintln(os.Stderr, "wtx: warning: gc保護refを作成できませんでした:", err)
+		} else {
+			meta.KeepRefs = true
+		}
+	} else if repo != nil {
+		meta.MainRepo, meta.Branch = repo.HostRepo, repo.Branch
 	}
 	if !*noClaude {
 		if err := copyClaudeCreds(name); err != nil {
@@ -170,23 +225,25 @@ func cmdUp(args []string) error {
 		}
 	}
 
-	meta := instanceMeta{Workdir: workdir, Isolated: isolated}
-	if wt != nil {
-		meta.MainRepo = wt.MainRepo
-		meta.Branch = wt.Branch
-	}
 	mb, _ := json.MarshalIndent(meta, "", "  ")
 	if err := os.WriteFile(filepath.Join(wtxHome(), name+".json"), mb, 0o644); err != nil {
 		return err
 	}
 
-	fmt.Printf("ready:\n")
-	fmt.Printf("  wtx shell %s\n", name)
+	fmt.Printf("ready:\n  wtx shell %s\n", name)
 	if isolated {
 		fmt.Printf("  wtx sync %s        # VM内のコミットをホストへ回収\n", name)
 	}
 	fmt.Printf("  wtx rm %s\n", name)
 	return nil
+}
+
+func copyFile(src, dst string) error {
+	b, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, b, 0o644)
 }
 
 func loadMeta(name string) (*instanceMeta, error) {
@@ -206,6 +263,11 @@ func cmdRm(args []string) error {
 		return fmt.Errorf("NAME required")
 	}
 	name := args[0]
+	if meta, err := loadMeta(name); err == nil && meta.KeepRefs && meta.MainRepo != "" {
+		if err := unpinHostObjects(meta.MainRepo, name); err != nil {
+			fmt.Fprintln(os.Stderr, "wtx: warning:", err)
+		}
+	}
 	socks, _ := filepath.Glob(filepath.Join(wtxHome(), name+"-*.sock"))
 	for _, s := range socks {
 		_ = exec.Command("ssh", "-S", s, "-O", "exit", "lima-"+name).Run()

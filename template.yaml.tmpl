@@ -41,6 +41,18 @@ provision:
       "insecure-registries": ["host.lima.internal:{{.MirrorPort}}"]
     }
     DAEMON
+    # Docker Hub 以外は containerd の certs.d で透過的にミラーを使う（Docker 29 で動作確認）
+{{- range .Mirrors}}
+    mkdir -p /etc/containerd/certs.d/{{.Registry}}
+    cat >/etc/containerd/certs.d/{{.Registry}}/hosts.toml <<'HOSTS'
+    server = "{{.Upstream}}"
+
+    [host."http://host.lima.internal:{{.Port}}"]
+      capabilities = ["pull", "resolve"]
+      skip_verify = true
+    HOSTS
+    sed -i 's/^    //' /etc/containerd/certs.d/{{.Registry}}/hosts.toml
+{{- end}}
     export DEBIAN_FRONTEND=noninteractive
     curl -fsSL https://get.docker.com | sh
     usermod -aG docker {{`{{.User}}`}}

@@ -10,10 +10,13 @@ import (
 
 const usage = `wtx — worktreeごとの隔離VM (Lima/vz) + VM内dockerd + 内蔵レジストリミラー
 
+  wtx image build|rm|status         プロビジョニング済みゴールデンVM（cloneで高速起動）
   wtx mirror up|down|status|serve   pull-throughレジストリキャッシュ（Goプロセス、Docker不要）
+        install|uninstall           launchdオンデマンド起動（常駐プロセスなし）
   wtx up NAME WORKDIR [MOUNT[:ro]...] [flags]
-        --share-git   隔離gitを無効化し、メイン.gitをrw共有（旧方式）
+        --share-git   隔離gitを無効化し、ホストの.gitをrw共有（旧方式）
         --no-claude   Claude資格情報のコピーを行わない
+        --no-clone    ゴールデンVMを使わず新規プロビジョニング
         --memory 4GiB --cpus 2 --disk 20GiB
   wtx exec NAME [-w DIR] CMD...     VM内で実行（シェル構文は bash -c '...' で）
   wtx shell NAME                    対話シェル
@@ -54,6 +57,8 @@ func main() {
 		err = cmdRm(os.Args[2:])
 	case "mirror":
 		err = cmdMirror(os.Args[2:])
+	case "image":
+		err = cmdImage(os.Args[2:])
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 	default:
