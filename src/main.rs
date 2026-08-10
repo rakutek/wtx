@@ -1,11 +1,11 @@
 //! wtx — worktree × コーディングエージェントの並列開発ツール。
 //! worktree ごとに独立VM（Lima/vz）+ VM内dockerd を与え、`up --from` で
-//! DB（volume）・イメージごと環境を引き継げる。設計と検証記録は VERIFICATION.md を参照。
-mod creds;
-mod gitiso;
+//! DB（volume）・イメージごと環境を引き継げる。git はホストと rw 共有
+//! （VM内コミット＝ホストに直接反映）。設計と検証記録は VERIFICATION.md を参照。
 mod launchd;
 mod lima;
 mod mirror;
+mod repo;
 mod sshx;
 mod tui;
 mod util;
@@ -17,7 +17,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "wtx",
     version,
-    about = "Per-worktree isolated VMs with in-VM dockerd and a built-in registry cache"
+    about = "Per-worktree VMs with in-VM dockerd and a built-in registry cache"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -26,7 +26,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Create and start a VM (worktrees are detected automatically and get isolated git)
+    /// Create and start a VM (the host git is shared: commits in the VM land on the host)
     Up {
         name: String,
         workdir: String,
@@ -45,10 +45,7 @@ enum Cmd {
         /// images and installed tools carry over (the source is stopped briefly)
         #[arg(long, conflicts_with = "no_clone")]
         from: Option<String>,
-        /// Disable isolated git and share the host .git read-write (legacy mode)
-        #[arg(long)]
-        share_git: bool,
-        /// Do not copy Claude credentials into the VM
+        /// Do not mount the host ~/.claude into the VM
         #[arg(long)]
         no_claude: bool,
         /// Provision from scratch instead of cloning the golden VM
@@ -73,8 +70,6 @@ enum Cmd {
         #[arg(long)]
         snapshot: bool,
     },
-    /// Fetch commits made inside the VM to the host as refs/wtx/<name>/*
-    Sync { name: String },
     /// Publish a VM port on the host (ssh -L) HOST:GUEST
     Forward { name: String, spec: String },
     /// Expose a host port inside the VM (ssh -R) GUEST:HOST
@@ -83,24 +78,18 @@ enum Cmd {
     Unforward { name: String, port: String },
     /// Stop a VM
     Stop { name: String },
-    /// Delete a VM (its databases and images go with it)
+    /// Delete a VM (its databases and images go with it; commits are already on the host)
     Rm {
         name: String,
         /// Also remove the linked git worktree the VM was created from
         #[arg(long)]
         with_worktree: bool,
-        /// Delete even if the VM holds commits that were never fetched to the host
-        #[arg(long)]
-        force: bool,
     },
-    /// Delete VMs whose worktree no longer exists (skips VMs with unfetched commits)
+    /// Delete VMs whose worktree no longer exists
     Prune {
         /// Actually delete them (without this, only report what would be deleted)
         #[arg(long)]
         yes: bool,
-        /// Skip the unfetched-commit check
-        #[arg(long)]
-        force: bool,
     },
     /// Pre-provisioned golden VM (build|rm|status); wtx up clones it for fast startup
     Image {
@@ -135,11 +124,11 @@ fn run() -> Result<()> {
                 tui::run()
             }
         }
-        Some(Cmd::Up { name, workdir, mounts, memory, cpus, disk, from, share_git, no_claude, no_clone }) => {
+        Some(Cmd::Up { name, workdir, mounts, memory, cpus, disk, from, no_claude, no_clone }) => {
             lima::up(
                 &name,
                 &workdir,
-                lima::UpOpts { memory, cpus, disk, from, share_git, no_claude, no_clone, extra_mounts: mounts },
+                lima::UpOpts { memory, cpus, disk, from, no_claude, no_clone, extra_mounts: mounts },
             )
         }
         Some(Cmd::Exec { name, workdir, cmd }) => sshx::exec(&name, workdir.as_deref(), &cmd),
@@ -148,13 +137,12 @@ fn run() -> Result<()> {
             lima::ls();
             Ok(())
         }
-        Some(Cmd::Sync { name }) => lima::sync(&name),
         Some(Cmd::Forward { name, spec }) => sshx::forward(&name, &spec, false),
         Some(Cmd::Bridge { name, spec }) => sshx::forward(&name, &spec, true),
         Some(Cmd::Unforward { name, port }) => sshx::unforward(&name, &port),
         Some(Cmd::Stop { name }) => util::limactl(&["stop", &name]),
-        Some(Cmd::Rm { name, with_worktree, force }) => lima::rm(&name, with_worktree, force),
-        Some(Cmd::Prune { yes, force }) => lima::prune(force, yes),
+        Some(Cmd::Rm { name, with_worktree }) => lima::rm(&name, with_worktree),
+        Some(Cmd::Prune { yes }) => lima::prune(yes),
         Some(Cmd::Image { action }) => match action.as_str() {
             "build" => lima::image_build(),
             "rm" => lima::image_rm(),

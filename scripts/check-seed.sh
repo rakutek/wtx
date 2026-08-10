@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # wtx up --from(環境の引き継ぎ)を実VMで通しで検証する。
 #
-# 同一メインリポジトリの worktree 2本を使う。これは最も危険なパス:
-# clone 元の wtx-gitmount / .wtx-local が新VMに残ると、新VMが clone 元の
-# VMローカル git を黙って使い続ける(seed_cleanup がそれを防ぐ)。
+# 同一メインリポジトリの worktree 2本を使い、volume の付け替え・イメージ引き継ぎ・
+# 共有 git の非干渉(新VMのコミットが自分のブランチにだけ乗る)を確認する。
 #   使い方: scripts/check-seed.sh   (VMを2台作って消すので数分かかる)
 set -u
 WTX=${WTX:-$(command -v wtx 2>/dev/null || echo "$(cd "$(dirname "$0")/.." && pwd)/target/release/wtx")}
@@ -16,8 +15,8 @@ fail() { echo "FAIL  $1"; FAILED=1; }
 chk()  { if eval "$2" >/dev/null 2>&1; then pass "$1"; else fail "$1"; fi; }
 
 cleanup() {
-  $WTX rm "$A" --force >/dev/null 2>&1
-  $WTX rm "$B" --force >/dev/null 2>&1
+  $WTX rm "$A" >/dev/null 2>&1
+  $WTX rm "$B" >/dev/null 2>&1
   git -C "$REPO" worktree remove --force "$REPO-a" >/dev/null 2>&1
   git -C "$REPO" worktree remove --force "$REPO-b" >/dev/null 2>&1
   rm -rf "$REPO" "$REPO-a" "$REPO-b"
@@ -77,15 +76,13 @@ $WTX exec "$B" -w "$REPO-b" docker compose up -d >/dev/null 2>&1 || fail "compos
 chk "サービスから引き継いだデータが見える" \
     "$WTX exec $B -w '$REPO-b' docker compose exec -T app cat /data/seed.txt | grep -q inherited"
 
-echo "=== 7. git が clone 元に汚染されていない ==="
-chk "新VMのVMローカル git は自分の名前"       "$WTX exec $B test -d /var/lib/wtx/git/$B"
-chk "clone 元のVMローカル git は残っていない"  "! $WTX exec $B test -e /var/lib/wtx/git/$A"
+echo "=== 7. 共有 git: 新VMのコミットが自分のブランチにだけ乗る ==="
+chk "隔離git残骸(/var/lib/wtx/git)が無い" "! $WTX exec $B test -e /var/lib/wtx/git"
+SEED_A_BEFORE=$(git -C "$REPO" rev-parse seed-a)
 $WTX exec "$B" -w "$REPO-b" bash -c 'echo b > b.txt && git add b.txt && git commit -qm "work in seeded VM"' \
   >/dev/null 2>&1 || fail "commit in $B"
-$WTX sync "$B" >/dev/null 2>&1
-chk "コミットが refs/wtx/$B/seed-b に回収される" \
-    "git -C '$REPO' rev-parse --verify -q refs/wtx/$B/seed-b"
-chk "clone 元のブランチには混ざらない" "! git -C '$REPO' rev-parse --verify -q refs/wtx/$A/seed-b"
+chk "ホストの seed-b にコミットが直接見える" "git -C '$REPO' log --oneline seed-b | grep -q 'work in seeded VM'"
+chk "clone 元のブランチ seed-a は動かない"   "[ \"\$(git -C '$REPO' rev-parse seed-a)\" = '$SEED_A_BEFORE' ]"
 
 echo "=== 8. clone 元VMがバックグラウンドで復帰している ==="
 n=0
@@ -96,7 +93,6 @@ chk "clone 元が Running に戻った"        "[ \"\$(limactl list $A --format 
 chk "clone 元の volume は元の名前のまま" "$WTX exec $A docker volume inspect ${A}_dbdata"
 
 echo "=== 9. 後始末 ==="
-$WTX sync "$A" >/dev/null 2>&1
 cleanup
 chk "VMと検証用リポジトリを撤去" "[ ! -d '$REPO' ] && ! limactl list $A --format '{{.Name}}' 2>/dev/null | grep -q ."
 

@@ -1,5 +1,5 @@
-use crate::gitiso::{self, RepoKind};
 use crate::mirror;
+use crate::repo::{self, RepoKind};
 use crate::util::*;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -14,7 +14,7 @@ pub struct Mount {
     pub writable: bool,
 }
 
-/// wtx up 時の判断を記録し、sync / rm / TUI が参照する。
+/// wtx up 時の判断を記録し、rm / TUI が参照する。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct InstanceMeta {
     pub workdir: String,
@@ -22,10 +22,6 @@ pub struct InstanceMeta {
     pub main_repo: String,
     #[serde(default)]
     pub branch: String,
-    #[serde(default)]
-    pub isolated: bool,
-    #[serde(default)]
-    pub keep_refs: bool,
     /// `wtx up --from` の clone 元（来歴。空なら通常作成）
     #[serde(default)]
     pub seeded_from: String,
@@ -44,7 +40,6 @@ pub struct UpOpts {
     pub cpus: Option<u32>,
     pub disk: String,
     pub from: Option<String>,
-    pub share_git: bool,
     pub no_claude: bool,
     pub no_clone: bool,
     pub extra_mounts: Vec<String>,
@@ -144,9 +139,10 @@ fn compose_project_name(dir: &Path) -> String {
 }
 
 /// `--from` で clone したVMから clone 元由来の状態を取り除き、compose の volume 名を
-/// 新しい worktree のプロジェクト名に付け替える。setup_isolated_git より前に呼ぶこと:
-/// clone 元の .wtx-local マーカーが残っていると同一メインリポジトリの worktree で
-/// マーカー判定が誤爆し、新VMが clone 元のVMローカル git を使い続けてしまう。
+/// 新しい worktree のプロジェクト名に付け替える。
+/// 隔離gitの除去は旧バージョンのwtxが作ったVMからの移行措置:
+/// clone 元に .wtx-local オーバーレイが残っていると、新VMの git が clone 元の
+/// VMローカル git を黙って使い続けてしまうため、剥がせない場合だけ失敗させる。
 fn seed_cleanup(name: &str, src: &str, workdir: &Path) -> Result<()> {
     let src_meta = load_meta(src);
     let old_gitdir = src_meta
@@ -166,9 +162,9 @@ OLDGIT={oldgit}
 SRC={src}
 DST={dst}
 
-# clone 元の隔離git状態を除去する。unit の停止・削除はベストエフォートだが、
-# 剥がせない overlay を残したまま進むと git が黙って clone 元の状態を指すので、
-# その場合だけは失敗させる。
+# 旧バージョンのwtxが作った隔離git状態の除去（レガシーVMからの移行措置）。
+# unit の停止・削除はベストエフォートだが、剥がせない overlay を残したまま進むと
+# git が黙って clone 元の状態を指すので、その場合だけは失敗させる。
 sudo systemctl disable --now wtx-gitmount.service >/dev/null 2>&1 || true
 sudo rm -f /etc/systemd/system/wtx-gitmount.service /usr/local/sbin/wtx-gitmount
 sudo systemctl daemon-reload >/dev/null 2>&1 || true
@@ -234,8 +230,7 @@ pub fn up(name: &str, workdir: &str, o: UpOpts) -> Result<()> {
         eprintln!("wtx: warning: mirror is down - pulls go straight upstream (wtx mirror up)");
     }
 
-    let repo = gitiso::inspect_repo(&workdir)?;
-    let isolated = repo.is_some() && !o.share_git;
+    let repo = repo::inspect_repo(&workdir)?;
 
     let mut mounts = vec![Mount {
         location: workdir.to_string_lossy().into_owned(),
@@ -243,12 +238,25 @@ pub fn up(name: &str, workdir: &str, o: UpOpts) -> Result<()> {
     }];
     if let Some(r) = &repo {
         if r.kind == RepoKind::Worktree {
-            // メインの .git は workdir の外にあるので別マウントする
-            // （隔離モードでは ro。VMローカルの .git を bind で被せる）
+            // メインの .git は workdir の外にあるので別マウントする（rw共有。
+            // VM内コミットはホストのブランチをそのまま動かす）
             mounts.push(Mount {
                 location: r.host_git.to_string_lossy().into_owned(),
-                writable: !isolated,
+                writable: true,
             });
+        }
+    }
+    // ~/.claude はマウントで共有する。資格情報・settings・skills がホストとライブで
+    // 一致し、VM側でのトークンリフレッシュもホストとずれない。
+    let host_claude = dirs::home_dir().unwrap_or_default().join(".claude");
+    if !o.no_claude {
+        if host_claude.is_dir() {
+            mounts.push(Mount {
+                location: host_claude.to_string_lossy().into_owned(),
+                writable: true,
+            });
+        } else {
+            eprintln!("wtx: warning: {} not found; claude runs unauthenticated", host_claude.display());
         }
     }
     for m in &o.extra_mounts {
@@ -268,6 +276,7 @@ pub fn up(name: &str, workdir: &str, o: UpOpts) -> Result<()> {
     render_yaml(&mounts, o.cpus.unwrap_or(2), o.memory.as_deref().unwrap_or("4GiB"), &o.disk, &yaml)?;
 
     let status = lima_status(name);
+    let existed = !status.is_empty();
     if let Some(src) = o.from.as_deref() {
         // 既存VMを clone して DB（volume）・イメージ・導入済みツールごと引き継ぐ。
         // 停止中のディスクを複製するので at-rest の一貫したコピーになる。
@@ -316,67 +325,63 @@ pub fn up(name: &str, workdir: &str, o: UpOpts) -> Result<()> {
 
     let mut meta = InstanceMeta {
         workdir: workdir.to_string_lossy().into_owned(),
-        isolated,
         seeded_from: o.from.clone().unwrap_or_default(),
         ..Default::default()
     };
     if let Some(r) = &repo {
         meta.main_repo = r.host_repo.to_string_lossy().into_owned();
         meta.branch = r.branch.clone();
-        if isolated {
-            gitiso::setup_isolated_git(name, r, &workdir)?;
-            match gitiso::pin_host_objects(&r.host_repo, name) {
-                Ok(_) => meta.keep_refs = true,
-                Err(e) => eprintln!("wtx: warning: could not create gc-protection refs: {e}"),
+        // 旧バージョンのwtxが作ったVMは隔離gitオーバーレイが生きていて、
+        // コミットがVMローカルに落ちたままホストに現れない。作り直しを促す。
+        if existed && o.from.is_none() {
+            let marker = format!("test -e {}/.wtx-local && echo legacy || true", shq(&r.host_git.to_string_lossy()));
+            if let Ok(out) = crate::sshx::capture(name, &marker) {
+                if out.contains("legacy") {
+                    eprintln!(
+                        "wtx: warning: {name} was created by an older wtx with isolated git; \
+                         commits made inside it do NOT reach the host. Recreate it: wtx rm {name} && wtx up ..."
+                    );
+                }
             }
         }
     }
     if let Err(e) = mirror::apply_to_vm(name) {
         eprintln!("wtx: warning: mirror config not applied: {e}");
     }
-    if !o.no_claude {
-        if let Err(e) = crate::creds::copy_claude_creds(name) {
-            eprintln!("wtx: warning: claude credentials not copied: {e}");
+    // マウントは作成時に固定される。--no-claude で作られた既存VMではマウント先が
+    // 存在しないので、スクリプト側の -d ガードが symlink 作成をスキップする。
+    if !o.no_claude && host_claude.is_dir() {
+        let script = format!(
+            r#"set -eu
+H={h}
+[ -d "$H" ] || exit 0
+if [ ! -L "$HOME/.claude" ]; then rm -rf "$HOME/.claude"; ln -s "$H" "$HOME/.claude"; fi"#,
+            h = shq(&host_claude.to_string_lossy()),
+        );
+        if let Err(e) = crate::sshx::vm_script(name, &script, None) {
+            eprintln!("wtx: warning: could not link ~/.claude in the VM: {e}");
         }
     }
     std::fs::write(meta_path(name), serde_json::to_string_pretty(&meta)?)?;
 
-    println!("ready:\n  wtx shell {name}");
-    if isolated {
-        println!("  wtx sync {name}        # fetch commits made in the VM back to the host");
-    }
-    println!("  wtx rm {name}");
+    println!("ready:\n  wtx shell {name}\n  wtx rm {name}");
     Ok(())
 }
 
-/// 回収されていないVM内コミットがあれば、そのブランチ名を返す。
-/// 停止中のVMは問い合わせられないので空（判定不能）を返す。
-fn pending_commits(name: &str, meta: &InstanceMeta) -> Vec<String> {
-    if !meta.isolated || meta.main_repo.is_empty() || lima_status(name) != "Running" {
-        return vec![];
+/// 旧バージョンのwtxが作った gc保護 ref（refs/wtx/keep/<name>/*）の後始末（ベストエフォート）。
+fn unpin_legacy_keep_refs(host_repo: &Path, name: &str) {
+    let prefix = format!("refs/wtx/keep/{name}/");
+    let out = git_out(host_repo, &["for-each-ref", "--format=%(refname)", &prefix]);
+    for r in out.split_whitespace() {
+        let _ = git_run(host_repo, &["update-ref", "-d", r]);
     }
-    let repo = Path::new(&meta.main_repo);
-    if !repo.exists() {
-        return vec![];
-    }
-    gitiso::unfetched_branches(name, repo).unwrap_or_default()
 }
 
-pub fn rm(name: &str, with_worktree: bool, force: bool) -> Result<()> {
+pub fn rm(name: &str, with_worktree: bool) -> Result<()> {
     let meta = load_meta(name);
     if let Some(m) = &meta {
-        if !force {
-            let pending = pending_commits(name, m);
-            if !pending.is_empty() {
-                return Err(anyhow!(
-                    "{name} has commits not yet fetched to the host ({}). \
-                     Run `wtx sync {name}` first, or pass --force to discard them",
-                    pending.join(", ")
-                ));
-            }
-        }
-        if m.keep_refs && !m.main_repo.is_empty() {
-            gitiso::unpin_host_objects(Path::new(&m.main_repo), name);
+        if !m.main_repo.is_empty() {
+            unpin_legacy_keep_refs(Path::new(&m.main_repo), name);
         }
     }
     crate::sshx::close_all_forwards(name);
@@ -409,48 +414,20 @@ pub fn rm(name: &str, with_worktree: bool, force: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn sync(name: &str) -> Result<()> {
-    let m = load_meta(name).ok_or_else(|| anyhow!("no metadata for {name}"))?;
-    if m.main_repo.is_empty() {
-        return Err(anyhow!("{name} is not a git VM; nothing to sync"));
-    }
-    gitiso::sync(name, Path::new(&m.main_repo), &m.workdir, &m.branch, m.isolated)
-}
-
-/// worktree が消えた（孤児）VM を掃除する。
-/// 未回収コミットが残っているVMは既定でスキップする。
-pub fn prune(force: bool, yes: bool) -> Result<()> {
+/// worktree が消えた（孤児）VM を掃除する。コミットはホストの .git に直接刻まれている
+/// ので、VMを消しても作業が失われることはない。
+pub fn prune(yes: bool) -> Result<()> {
     let orphans: Vec<Instance> = list_instances().into_iter().filter(|i| i.orphaned).collect();
     if orphans.is_empty() {
         println!("no orphaned VMs");
         return Ok(());
     }
     for i in &orphans {
-        let Some(meta) = load_meta(&i.name) else { continue };
-        if !force {
-            if meta.isolated && lima_status(&i.name) != "Running" {
-                println!("starting {} to check for unfetched commits...", i.name);
-                if let Err(e) = limactl(&["start", &i.name, "--tty=false"]) {
-                    println!("  skip {}: could not start it to verify ({e})", i.name);
-                    continue;
-                }
-            }
-            let pending = pending_commits(&i.name, &meta);
-            if !pending.is_empty() {
-                println!(
-                    "  skip {}: unfetched commits on {} (run `wtx sync {}`)",
-                    i.name,
-                    pending.join(", "),
-                    i.name
-                );
-                continue;
-            }
-        }
         if !yes {
             println!("  would delete {} (workdir gone: {})", i.name, i.workdir);
             continue;
         }
-        match rm(&i.name, false, true) {
+        match rm(&i.name, false) {
             Ok(_) => println!("  deleted {}", i.name),
             Err(e) => println!("  failed to delete {}: {e}", i.name),
         }
@@ -469,26 +446,17 @@ pub fn ls() {
         return;
     }
     println!(
-        "{}{}{}{}",
+        "{}{}{}",
         pad("NAME", 24),
         pad("STATUS", 10),
-        pad("GIT", 10),
         pad("BRANCH", 16)
     );
     for i in &rows {
-        let git = if i.isolated {
-            "isolated"
-        } else if i.workdir.is_empty() {
-            "-"
-        } else {
-            "shared"
-        };
         let suffix = if i.orphaned { "  (orphaned: workdir gone)" } else { "" };
         println!(
-            "{}{}{}{}{}{}",
+            "{}{}{}{}{}",
             pad(&i.name, 24),
             pad(&i.status, 10),
-            pad(git, 10),
             pad(&i.branch, 16),
             i.workdir,
             suffix
@@ -506,10 +474,9 @@ pub struct Instance {
     pub status: String,
     pub workdir: String,
     pub branch: String,
-    pub isolated: bool,
     /// プロジェクト（ホスト側リポジトリルート）。TUI のグループ化キー。
     pub repo: String,
-    /// worktree が消えているVM。VM内のコミットが取り残されている可能性がある。
+    /// worktree が消えているVM。コミットはホストにあるので消しても作業は失われない。
     pub orphaned: bool,
 }
 
@@ -526,8 +493,7 @@ pub fn list_instances() -> Vec<Instance> {
                 orphaned: !workdir.is_empty() && !Path::new(&workdir).exists(),
                 workdir: meta.as_ref().map(|m| m.workdir.clone()).unwrap_or_default(),
                 branch: meta.as_ref().map(|m| m.branch.clone()).unwrap_or_default(),
-                repo: meta.as_ref().map(|m| m.main_repo.clone()).unwrap_or_default(),
-                isolated: meta.map(|m| m.isolated).unwrap_or(false),
+                repo: meta.map(|m| m.main_repo).unwrap_or_default(),
             })
         })
         .collect()

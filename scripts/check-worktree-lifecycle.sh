@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# wtx の worktree ライフサイクル（作成→回収→削除→孤児検出→prune）を通しで検証する。
+# wtx の worktree ライフサイクル（作成→VM内コミットがホストに直接反映→削除→孤児検出→prune）を
+# 通しで検証する。git はホストと rw 共有なので、VM内コミットは即ホストのブランチに現れる。
 #
 # 実際にVMを2台作って消すため 1〜2分かかる。既に孤児VMがある場合は、prune が
 # ユーザーのVMを巻き込む恐れがあるので中止する。
@@ -21,10 +22,12 @@ if [ "$PRE_ORPHANS" != "0" ]; then
 fi
 pass "既存の孤児VMなし（prune検証を安全に実行できる）"
 
-echo "=== 1. ヘルプに新コマンドが出る ==="
+echo "=== 1. ヘルプ ==="
 chk "wtx --help に prune がある"            "$WTX --help | grep -q '^  prune'"
+chk "wtx --help に sync が無い"             "! $WTX --help | grep -q '^  sync'"
 chk "wtx rm --help に --with-worktree がある" "$WTX rm --help | grep -q -- '--with-worktree'"
-chk "wtx prune --help に --yes/--force がある" "$WTX prune --help | grep -q -- '--yes' && $WTX prune --help | grep -q -- '--force'"
+chk "wtx rm --help に --force が無い"        "! $WTX rm --help | grep -q -- '--force'"
+chk "wtx prune --help に --yes がある"       "$WTX prune --help | grep -q -- '--yes'"
 
 echo "=== 2. 検証用リポジトリと worktree 2本 ==="
 rm -rf "$REPO" "$REPO-a" "$REPO-b"
@@ -37,54 +40,65 @@ $WTX up wtxcheck-b "$REPO-b" >/dev/null 2>&1 || fail "wtx up wtxcheck-b"
 chk "VM 2台が起動" "[ \$(limactl list wtxcheck-a wtxcheck-b --format '{{.Status}}' | grep -c Running) -eq 2 ]"
 chk "この時点では孤児ではない" "! $WTX ls | grep -q orphaned"
 
+echo "=== 2b. ~/.claude 共有と ssh-agent フォワード ==="
+if [ -d "$HOME/.claude" ]; then
+  chk "VM内 ~/.claude がホストへの symlink" "$WTX exec wtxcheck-a bash -c 'test -L ~/.claude && test -d ~/.claude/'"
+else
+  echo "SKIP  ホストに ~/.claude が無いため確認省略"
+fi
+if [ -n "${SSH_AUTH_SOCK:-}" ]; then
+  # ssh-add -l は 鍵あり=0 / 鍵なし=1 / agent不達=2。フォワード自体の確認なので 2 以外なら成功
+  chk "ssh-agent がVMへフォワードされる" "$WTX exec wtxcheck-a bash -c 'ssh-add -l >/dev/null 2>&1; [ \$? -ne 2 ]'"
+else
+  echo "SKIP  ホストに SSH_AUTH_SOCK が無いため確認省略"
+fi
+
 echo "=== 3. TUI がプロジェクト単位でまとめる ==="
 $WTX tui --snapshot > /tmp/wtxcheck-tui1.txt 2>&1
 chk "TUI にプロジェクト見出しと [2/2 running]" "grep -q 'wtxcheck' /tmp/wtxcheck-tui1.txt && grep -q '2/2 running' /tmp/wtxcheck-tui1.txt"
 
-echo "=== 4. rm の安全弁（未回収コミット）==="
+echo "=== 4. VM内コミットがホストに直接反映される（共有git） ==="
 $WTX exec wtxcheck-a -w "$REPO-a" bash -c 'echo a > a.txt && git add a.txt && git commit -qm "work in VM A"' >/dev/null 2>&1
-OUT=$($WTX rm wtxcheck-a --with-worktree 2>&1); RC=$?
-chk "未回収コミットがあると rm が失敗する" "[ $RC -ne 0 ]"
-chk "エラーが sync を促す"                  "echo '$OUT' | grep -q 'wtx sync wtxcheck-a'"
-chk "拒否されたVMは残っている"              "[ \$(limactl list wtxcheck-a --format '{{.Status}}') = Running ]"
-chk "拒否時は worktree も残る"              "[ -d '$REPO-a' ]"
+chk "ホストの feat-a にコミットが見える"   "git -C '$REPO' log --oneline feat-a | grep -q 'work in VM A'"
+chk "ホスト側 worktree はクリーン"          "[ -z \"\$(git -C '$REPO-a' status --porcelain)\" ]"
+chk "gc保護ref は作られない"                "[ \$(git -C '$REPO' for-each-ref refs/wtx/ | wc -l) -eq 0 ]"
 
-echo "=== 5. sync 後は rm --with-worktree が通る ==="
-$WTX sync wtxcheck-a >/dev/null 2>&1
-chk "コミットが refs/wtx/wtxcheck-a/feat-a に回収された" \
-    "git -C '$REPO' rev-parse --verify -q refs/wtx/wtxcheck-a/feat-a"
+echo "=== 5. 2台のVMから同一リポジトリへ同時コミット（virtiofs 越しの ref ロック） ==="
+$WTX exec wtxcheck-a -w "$REPO-a" bash -c 'for i in 1 2 3; do echo a$i > race-a$i.txt && git add . && git commit -qm "race A $i"; done' >/dev/null 2>&1 &
+PID_A=$!
+$WTX exec wtxcheck-b -w "$REPO-b" bash -c 'for i in 1 2 3; do echo b$i > race-b$i.txt && git add . && git commit -qm "race B $i"; done' >/dev/null 2>&1 &
+PID_B=$!
+wait $PID_A; RC_A=$?
+wait $PID_B; RC_B=$?
+chk "両VMのコミットループが成功"    "[ $RC_A -eq 0 ] && [ $RC_B -eq 0 ]"
+chk "feat-a に3コミット追加"        "[ \$(git -C '$REPO' log --oneline feat-a | grep -c 'race A') -eq 3 ]"
+chk "feat-b に3コミット追加"        "[ \$(git -C '$REPO' log --oneline feat-b | grep -c 'race B') -eq 3 ]"
+chk "リポジトリが壊れていない (fsck)" "! git -C '$REPO' fsck --strict 2>&1 | grep -qE 'error|fatal'"
+
+echo "=== 6. rm --with-worktree（syncなしで即消せる） ==="
 $WTX rm wtxcheck-a --with-worktree >/dev/null 2>&1
 chk "VM が削除された"          "! limactl list wtxcheck-a --format '{{.Name}}' 2>/dev/null | grep -q wtxcheck-a"
 chk "worktree も畳まれた"      "[ ! -d '$REPO-a' ]"
-chk "gc保護ref が消えた"        "[ \$(git -C '$REPO' for-each-ref refs/wtx/keep/wtxcheck-a/ | wc -l) -eq 0 ]"
+chk "コミットはホストに残っている" "git -C '$REPO' log --oneline feat-a | grep -q 'work in VM A'"
 chk "メタデータが消えた"        "[ ! -f ~/.wtx/wtxcheck-a.json ]"
 
-echo "=== 6. worktree を外部から消したときの孤児検出 ==="
+echo "=== 7. worktree を外部から消したときの孤児検出 ==="
 $WTX exec wtxcheck-b -w "$REPO-b" bash -c 'echo b > b.txt && git add b.txt && git commit -qm "work in VM B"' >/dev/null 2>&1
 git -C "$REPO" worktree remove --force "$REPO-b"
 chk "wtx ls が orphaned と表示"  "$WTX ls | grep wtxcheck-b | grep -q orphaned"
 $WTX tui --snapshot > /tmp/wtxcheck-tui2.txt 2>&1
 chk "TUI にも orphaned が出る"   "grep -q 'orphaned' /tmp/wtxcheck-tui2.txt"
+chk "コミットは worktree 削除後もホストにある" "git -C '$REPO' log --oneline feat-b | grep -q 'work in VM B'"
 
-echo "=== 7. prune の安全弁 ==="
+echo "=== 8. prune（コミットはホストにあるので無条件に消してよい） ==="
+OUT=$($WTX prune 2>&1)
+chk "dry-run が削除対象を表示"   "echo '$OUT' | grep -q 'would delete wtxcheck-b'"
+chk "dry-run では消えない"       "limactl list wtxcheck-b --format '{{.Name}}' 2>/dev/null | grep -q wtxcheck-b"
 OUT=$($WTX prune --yes 2>&1)
-chk "未回収コミットのある孤児はスキップ" "echo '$OUT' | grep -q 'skip wtxcheck-b'"
-chk "スキップされたVMは残っている"      "limactl list wtxcheck-b --format '{{.Name}}' 2>/dev/null | grep -q wtxcheck-b"
-
-echo "=== 8. 孤児VMからでも sync できる ==="
-$WTX sync wtxcheck-b >/dev/null 2>&1
-chk "worktree が無くてもコミットを回収できた" \
-    "git -C '$REPO' rev-parse --verify -q refs/wtx/wtxcheck-b/feat-b"
-
-echo "=== 9. 停止中の孤児も prune が起動して検証・削除する ==="
-limactl stop wtxcheck-b >/dev/null 2>&1
-OUT=$($WTX prune --yes 2>&1)
-chk "停止中VMを起動して検証した"  "echo '$OUT' | grep -q 'starting wtxcheck-b'"
-chk "回収済みなので削除された"    "echo '$OUT' | grep -q 'deleted wtxcheck-b'"
+chk "prune --yes が削除"         "echo '$OUT' | grep -q 'deleted wtxcheck-b'"
 chk "VM が消えた"                "! limactl list wtxcheck-b --format '{{.Name}}' 2>/dev/null | grep -q wtxcheck-b"
-chk "gc保護ref が消えた"          "[ \$(git -C '$REPO' for-each-ref refs/wtx/keep/wtxcheck-b/ | wc -l) -eq 0 ]"
 
-echo "=== 10. 後始末 ==="
+echo "=== 9. 後始末 ==="
 chk "孤児が無くなった"            "$WTX prune | grep -q 'no orphaned VMs'"
 cd ~ && rm -rf "$REPO" "$REPO-a" "$REPO-b"
 chk "検証用リポジトリを撤去"      "[ ! -d '$REPO' ]"

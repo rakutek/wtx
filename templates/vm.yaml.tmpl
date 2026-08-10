@@ -8,6 +8,11 @@ cpus: __CPUS__
 memory: __MEMORY__
 disk: __DISK__
 
+# ホストの ssh-agent をVMへフォワードする（VM内から git push / gh がそのまま使える）。
+# 鍵ファイル自体はVMに置かない。ホスト側 agent に鍵が入っていることが前提。
+ssh:
+  forwardAgent: true
+
 mounts:
 __MOUNTS__
 
@@ -42,6 +47,8 @@ provision:
     apt-get install -y nodejs
     npm install -g @anthropic-ai/claude-code
     git config --system --add safe.directory '*'
+    # 初回 push が対話プロンプトで止まらないよう、未知ホスト鍵は TOFU で受け入れる
+    printf 'Host *\n  StrictHostKeyChecking accept-new\n' > /etc/ssh/ssh_config.d/90-wtx.conf
 - mode: user
   script: |
     #!/bin/bash

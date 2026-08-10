@@ -1,6 +1,10 @@
-# 検証記録: worktreeごとの隔離環境 + ブランチ専用DB
+# 検証記録: worktreeごとのVM環境 + ブランチ専用DB
 
-目的: 「git worktree = 隔離VM = 専用DB」の開発フロー（エージェントのYOLO実行を安全にし、ブランチごとにDBを分離する）を実機検証する。
+目的: 「git worktree = 専用VM = 専用DB」の開発フロー（ブランチごとにDB・ポート・イメージを分離する）を実機検証する。
+
+> **注**: フェーズ1〜7は「セキュリティサンドボックス」を要件に含めた時期の記録
+> （隔離git・資格情報コピー等）。フェーズ8でこの要件を撤去し、便利ツールに再定義した。
+> 現在の設計はフェーズ8を参照。
 
 ## 前提環境
 
@@ -228,3 +232,56 @@ pull済みイメージ・導入済みツールも新VMに乗る。volume 単位�
 | 新VMのコミットが refs/wtx/<B>/* に回収、clone 元の ref と混ざらない | PASS |
 | clone 元のバックグラウンド復帰・volume 無傷 | PASS |
 | `--from`/`--no-clone` の排他、seeded_from のメタ記録 | PASS |
+
+## フェーズ8: セキュリティサンドボックス要件の撤去（便利ツールへの再定義）
+
+wtxの目的を「worktreeごとの使い捨てdocker環境マネージャ」に絞り、セキュリティ由来の
+機構（隔離git・資格情報コピー・gc保護・sync/rm/pruneの安全弁）を撤去した。
+VMはセキュリティ境界ではなく、macOSで worktree ごとに dockerd・ポート名前空間を
+持つための器と再定義した（フェーズ4〜5の隔離git設計はこの時点で廃止。経緯として残す）。
+
+### 設計変更
+
+| 項目 | 変更 |
+|---|---|
+| git | 隔離git（roマウント＋alternates clone＋bind overlay）を削除し、ホストの `.git` を rw マウント共有。VM内コミット＝ホストのブランチに直接反映 |
+| `wtx sync` | コマンドごと削除（回収の儀式が不要になった） |
+| `wtx rm` / `prune` | 未回収コミットガードと `--force` を削除。コミットは常にホストにあるので、**VM削除で作業が失われる経路が構造的に消えた**（停止中VMを判定できない穴も一緒に消滅） |
+| gc保護 ref | 不要（alternates 参照が無い）。旧版が残した `refs/wtx/keep/*` は `wtx rm` がベストエフォートで掃除 |
+| `~/.claude` | コピー → **rwマウント＋ゲスト側 symlink**。資格情報・settings・skills がライブ共有になり、旧「OAuthリフレッシュのホスト競合が未検証」問題が構造的に消えた |
+| ssh-agent | Lima `ssh.forwardAgent: true` をテンプレートに追加。VM内から `git push` / `gh` が使える（鍵ファイルはVMに置かない）。未知ホスト鍵は `accept-new`（TOFU） |
+| 読み取り専用VM | reviewer用の位置づけを廃止（`:ro` 追加マウント自体は汎用機能として残置） |
+| コード | gitiso.rs（257行）と sync/pin/pending 判定を削除、リポジトリ判別のみ repo.rs（68行）に残す |
+
+### 懸案だった「共有rw gitへの複数VM同時コミット」の検証（2026-08-11、PASS）
+
+隔離gitが担っていた「複数VMの同時コミットが衝突しない」保証を、共有rwモードで
+実機確認した（check-worktree-lifecycle.sh フェーズ5）。2VMが同一リポジトリの
+別 worktree へ各3コミットを同時実行 → 両ブランチとも3コミット到達、
+`git fsck --strict` クリーン。worktree ごとに index/HEAD が分かれているため
+共有されるのは objects と refs のみで、virtiofs 越しの git ロックで実用上
+問題が出ないことを確認した。
+
+### 検証（両スクリプト全PASS、2026-08-11）
+
+| 項目 | 結果 |
+|---|---|
+| VM内コミットがホストのブランチに直接見える／ホスト側 worktree はクリーン | PASS |
+| 2VM同時コミット（各3件）→ 両ブランチ到達・fsck クリーン | PASS |
+| `wtx rm --with-worktree` が sync なしで即完了、コミットはホストに残る | PASS |
+| 孤児検出 → `prune`（dry-run → `--yes` で削除、スキップ機構なし） | PASS |
+| gc保護 ref（refs/wtx/*）が作られないこと | PASS |
+| VM内 `~/.claude` がホストへの symlink | PASS |
+| ssh-agent フォワード（VM内 `ssh-add` が agent に到達） | PASS |
+| `--from`: volume 付け替え・イメージ引き継ぎ・隔離git残骸なし | PASS |
+| `--from`: 新VMのコミットが自分のブランチにだけ乗り、clone 元ブランチは不動 | PASS |
+
+### レガシー移行
+
+- 旧版で作ったVMは隔離gitオーバーレイが生きたままで、コミットがVMローカルに落ち続ける。
+  `wtx up` での再アタッチ時に `.wtx-local` マーカーを検知して作り直しを警告する
+- `seed_cleanup` の隔離git除去は**移行措置として残置**（旧版VMを `--from` の clone 元に
+  したとき、stale overlay が新VMを黙って汚染するのを防ぐ。新版VMでは no-op）
+- ゴールデンVMは `wtx image rm && wtx image build` で再構築が必要（forwardAgent の焼き込み）
+- 実機の旧VM（hono-dev）は、VM作成時にホストrepoが空（unborn main）だったため
+  VMローカル git に ref が1つも無く、未回収コミットはゼロと確認してから移行した

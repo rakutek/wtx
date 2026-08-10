@@ -1,5 +1,5 @@
 //! ratatui コンソール: VMをプロジェクト（ホスト側リポジトリ）ごとにまとめて表示し、
-//! 起動/停止・sync・削除・シェル起動を1画面で操作する。
+//! 起動/停止・削除・シェル起動を1画面で操作する。
 use crate::lima::{self, Instance};
 use crate::mirror;
 use crate::util::pad;
@@ -30,7 +30,7 @@ struct App {
     last_refresh: Instant,
 }
 
-const HELP: &str = "r:refresh  s:start/stop  y:sync  Enter:shell/fold  Space:fold  d:delete  q:quit";
+const HELP: &str = "r:refresh  s:start/stop  Enter:shell/fold  Space:fold  d:delete  q:quit";
 
 impl App {
     fn new() -> Self {
@@ -166,7 +166,7 @@ fn event_loop<B: Backend + std::io::Write>(term: &mut Terminal<B>) -> Result<()>
                 if let Some(name) = app.selected_vm().map(|i| i.name.clone()) {
                     app.status = format!("deleting {name}...");
                     term.draw(|f| draw(f, &mut app))?;
-                    app.status = match lima::rm(&name, false, false) {
+                    app.status = match lima::rm(&name, false) {
                         Ok(_) => format!("deleted {name}"),
                         Err(e) => format!("delete failed: {e}"),
                     };
@@ -216,18 +216,6 @@ fn event_loop<B: Backend + std::io::Write>(term: &mut Terminal<B>) -> Result<()>
                     app.status = "select a VM first".into();
                 }
             }
-            KeyCode::Char('y') => {
-                if let Some(name) = app.selected_vm().map(|i| i.name.clone()) {
-                    app.status = format!("syncing {name}...");
-                    term.draw(|f| draw(f, &mut app))?;
-                    app.status = match lima::sync(&name) {
-                        Ok(_) => format!("{name}: fetched into refs/wtx/{name}/*"),
-                        Err(e) => format!("sync failed: {e}"),
-                    };
-                } else {
-                    app.status = "select a VM first".into();
-                }
-            }
             KeyCode::Enter => {
                 if app.toggle_group() {
                     continue;
@@ -272,8 +260,8 @@ fn draw(f: &mut Frame, app: &mut App) {
     );
     f.render_widget(
         Paragraph::new(format!(
-            "    {:<24}{:<10}{:<10}{:<16}{}",
-            "NAME", "STATUS", "GIT", "BRANCH", ""
+            "    {:<24}{:<10}{:<16}{}",
+            "NAME", "STATUS", "BRANCH", ""
         ))
         .style(Style::new().bold().fg(Color::Yellow)),
         chunks[1],
@@ -311,17 +299,10 @@ fn draw(f: &mut Frame, app: &mut App) {
                     "Stopped" => Color::DarkGray,
                     _ => Color::Yellow,
                 };
-                let git = if i.isolated {
-                    "isolated"
-                } else if i.workdir.is_empty() {
-                    "-"
-                } else {
-                    "shared"
-                };
                 let mut spans = vec![
                     Span::raw(format!("  {}", pad(&i.name, 24))),
                     Span::styled(pad(&i.status, 10), Style::new().fg(color)),
-                    Span::raw(format!("{}{}", pad(git, 10), pad(&i.branch, 16))),
+                    Span::raw(pad(&i.branch, 16)),
                 ];
                 if i.orphaned {
                     spans.push(Span::styled(
@@ -342,15 +323,13 @@ fn draw(f: &mut Frame, app: &mut App) {
 
     let detail = match app.selected_row() {
         Some(Row::Vm(i)) => format!(
-            "workdir : {}\nrepo    : {}\ngit     : {}",
+            "workdir : {}\nrepo    : {}{}",
             i.workdir,
             if i.repo.is_empty() { "-" } else { &i.repo },
             if i.orphaned {
-                "ORPHANED: the worktree is gone. Press y to fetch commits, then delete it"
-            } else if i.isolated {
-                "isolated (host .git stays untouched; press y to fetch commits)"
+                "\nORPHANED: the worktree is gone (commits are on the host; delete when done)"
             } else {
-                "shared or not a git repo"
+                ""
             }
         ),
         Some(Row::Group { key, vms, running }) => {

@@ -3,12 +3,14 @@ name: wtx
 description: >-
   Use the `wtx` CLI to give each git worktree its own microVM (Lima/vz) with a
   dedicated in-VM dockerd, so parallel worktree × coding-agent development does
-  not collide on DBs, ports or images. A new worktree VM can be seeded from an
+  not collide on DBs, ports or images. Git, ~/.claude and the ssh-agent are
+  shared with the host: commits made in a VM land directly on the host branch
+  and `git push` works from inside. A new worktree VM can be seeded from an
   existing one (`wtx up --from`: DB volumes, images and installed tools carry
-  over). Use when the user says "wtx", "worktreeごとにVM", "worktreeごとにDB",
-  "DBを引き継いでworktreeを生やす", "VM内でdocker",
-  "VM内でエージェントを走らせる", "Docker Sandboxesの代替",
-  "コミットを回収 / wtx sync", "ゴールデンVM",
+  over). wtx is a convenience tool, NOT a security sandbox — do not use it to
+  contain untrusted code. Use when the user says "wtx", "worktreeごとにVM",
+  "worktreeごとにDB", "DBを引き継いでworktreeを生やす", "VM内でdocker",
+  "VM内でエージェントを走らせる", "ゴールデンVM",
   "レジストリミラー / pull-throughキャッシュ", or wants parallel agents each
   with their own database and ports. Boundary: use orca-cli when the task is
   about Orca-managed worktrees/terminals/handoffs (Orca can call wtx from its
@@ -23,6 +25,10 @@ git worktree × コーディングエージェントの並列開発のための 
 DB・ポート・イメージを持ち、複数エージェントを同時に走らせても衝突しない。
 ホストと同じ絶対パスで worktree をマウントするので、ホスト側での直接編集はそのまま使える。
 VM内には docker（rootful）+ Node 22 + Claude Code + git が入っている。
+
+git・`~/.claude`・ssh-agent は**ホストと共有**される。VM内のコミットは即ホストのブランチに
+乗り、`git push` / `gh` / `claude` はVM内でそのまま使える。wtx は便利ツールであって
+**セキュリティサンドボックスではない**（信頼できないコードの封じ込めには使わない）。
 
 コマンドやフラグを暗記や推測で書かないこと。実行前に `wtx --help` /
 `wtx <cmd> --help` で確認する。例外は `wtx image` と `wtx mirror` の
@@ -43,28 +49,28 @@ wtx image build                # ゴールデンVM構築（3〜4分）
 ## 基本フロー
 
 ```bash
-wtx up NAME ~/repos/worktree-dir       # VM作成・起動（worktree自動判別、隔離git適用）
+wtx up NAME ~/repos/worktree-dir       # VM作成・起動（worktree自動判別、gitはホストと共有）
 wtx up NAME2 ~/repos/dir2 --from NAME  # 既存VMからDB(volume)・イメージごと引き継いで作成
 wtx exec NAME -w ~/repos/worktree-dir docker compose up -d --wait
 wtx shell NAME                         # 対話シェル（中で claude も使える）
-wtx sync NAME                          # VM内コミットをホストの refs/wtx/NAME/* へ回収
-wtx rm NAME [--with-worktree]          # VM削除（DB・イメージごと消える。worktreeも畳む）
+wtx rm NAME [--with-worktree]          # VM削除（DB・イメージごと消える。コミットはホストに残る）
 wtx ls                                 # 一覧（worktreeが消えたVMは orphaned と表示）
-wtx prune --yes                        # 孤児VMを掃除（未回収コミットがあるVMはスキップ）
+wtx prune --yes                        # 孤児VMを掃除
 wtx                                    # 引数なしで ratatui コンソール
 ```
 
+- VM内でコミットすると**そのままホストのブランチが進む**。回収の手順（旧 `wtx sync`）は
+  存在しない。push もVM内からそのまま実行できる（ホストの ssh-agent に鍵がある場合）。
 - TUI はVMを**プロジェクト（`wtx up` 時に記録したメインリポジトリ）ごとにまとめて**表示する。
   見出し行で `Space`/`Enter` を押すと開閉し、`[稼働数/総数]` の要約だけになる。
-  VM行では `s` 起動/停止、`y` sync、`d` 削除、`Enter` でシェル。
-
+  VM行では `s` 起動/停止、`d` 削除、`Enter` でシェル。
 - `wtx exec` は **argv 素通し**でシェル構文を解釈しない。パイプ・glob・リダイレクトは
   `wtx exec NAME bash -c '...'` の形で渡す。終了コードは素通しされる。
 - `wtx up` の主なフラグ: `--from`（既存VMから環境を引き継ぐ）、`--memory/--cpus`
   （省略時は新規 4GiB/2、clone は元の値を引き継ぐ）、`--disk`（新規プロビジョニング時のみ）、
-  `--share-git`（隔離git無効化・旧方式）、`--no-claude`（資格情報コピーなし）、
+  `--no-claude`（`~/.claude` をマウントしない）、
   `--no-clone`（clone せず新規プロビジョニング。`--from` と排他）。
-  追加マウントは位置引数で、`:ro` を付けると読み取り専用（reviewer 用 VM に使う）。
+  追加マウントは位置引数で、`:ro` を付けると読み取り専用。
 
 ## 環境の引き継ぎ（`wtx up --from`）
 
@@ -81,31 +87,12 @@ docker volume（DBデータ）・pull済みイメージ・導入済みツール�
 
 ## worktree を消したときの後始末
 
-`git worktree remove` に hook は無いため、**worktree を消してもVMは残る**。残ったVMはマウント先が
-空になり、VM内のコミットが取り残される。
+`git worktree remove` に hook は無いため、**worktree を消してもVMは残る**。
+コミットはホストの `.git` に刻まれているので、VMを消しても作業は失われない。
 
 - `wtx ls` / TUI は該当VMを `orphaned` と表示する
-- 孤児VMからでも `wtx sync NAME` は動く（fetch 元はVMローカル git で worktree に依存しない）
-- `wtx prune --yes` で孤児VMを削除。**未回収コミットがあるVMは自動でスキップ**され、
-  `wtx sync` を促す（確認を省くなら `--force`）
+- `wtx prune`（dry-run）→ `wtx prune --yes` で孤児VMを削除
 - 最初から一度で片付けるなら `wtx rm NAME --with-worktree`
-- `wtx rm` は未回収コミットがあると拒否する（`--force` で破棄）
-
-## 隔離 git の運用（データ消失に直結する注意）
-
-デフォルトでホストの `.git` は ro マウントされ、VM は自分専用の index/refs を持つ
-（objects は alternates 参照でコピーゼロ）。ホストへの hooks/config 注入による
-VM 脱出は worktree モードでは構造的に不可能。通常リポジトリ（非 worktree）モードのみ、
-VM 起動直後に `wtx-gitmount.service` が bind を張るまでのごく短い間、ホストの `.git` が
-VM から書き込み可能になる窓がある。運用上の帰結:
-
-- **`wtx rm` の前に必ず `wtx sync`**。VM ローカルのコミットは VM と一緒に消える。
-- VM 内でコミットしてもホストのブランチは動かない。ホスト側 `git status` には
-  VM の変更が**未コミットとして見える**が、これは正常。ホストで作業しているときに
-  この表示を「未保存の変更」と誤読しないこと。
-- 回収手順: `wtx sync NAME` → ホストで `git merge --ff-only refs/wtx/NAME/<branch>`。
-  ホストのブランチを勝手に動かす仕組みは無い。
-- `wtx up` 時にホストへ gc 保護 ref `refs/wtx/keep/NAME/*` が作られ、`wtx rm` で消える。
 
 ## ポート
 
@@ -131,15 +118,19 @@ wtx mirror [status|serve|up|down|install|uninstall] # 省略時 status
   ghcr.io / quay.io などは `docker pull localhost:5002/<org>/<image>` の明示形なら使える。
 - ミラーが落ちていても pull は上流直行にフォールバックする（ビルドは止まらない）。
 - `~/.wtx/mirrors.json` を編集したら `wtx mirror install` を再実行する。
-- ゴールデンVMには Hub ミラーポート設定が焼き込まれる。`daemon.json` のポートを
+- ゴールデンVMには Hub ミラーポート設定と `ssh.forwardAgent` が焼き込まれる。
   変えたら `wtx image rm && wtx image build`。
 
 ## エージェント運用のヒント
 
 - tty なしで TUI の状態を確認するには `wtx tui --snapshot`（1フレーム描画して終了）。
   VM 一覧だけなら `wtx ls`。
-- `wtx up` はホストの `~/.claude/.credentials.json` を VM へ**コピー**する
-  （マウントではない。トークンのスナップショット）。不要なら `--no-claude`。
+- `wtx up` はホストの `~/.claude` を VM に**マウント**する（資格情報・settings・skills が
+  ホストとライブで一致）。不要なら `--no-claude`。
+- VM内からの `git push` はホストの ssh-agent フォワード経由。鍵が agent に無いと失敗する
+  （その場合はホスト側で push するか、`ssh-add` で鍵を載せてもらう）。
+- 旧バージョンのwtx（隔離gitモード）で作られたVMでは、VM内コミットがホストに現れない。
+  `wtx up` での再アタッチ時に警告が出たら、そのVMは作り直す。
 - オーケストレータ（Orca 等）からは `wtx up` / `wtx exec` をそのまま呼べばよい。
   worker から ホスト常駐サービスへ届かせるには `wtx bridge`。完了通知は
   共有マウント上のファイル（例: `.result/`）で受ける運用も可。
