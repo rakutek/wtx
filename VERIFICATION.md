@@ -191,3 +191,40 @@ Go実装を削除し Rust で再実装（`../wtx/src/`）。
 - workdirが通常リポジトリ（linked worktreeでない）の場合は隔離gitが適用されない
 - ミラーはdocker.ioのみ（`registry-mirrors`自体がHub専用）。launchdオンデマンド起動は未実装
 - VM作成に3〜4分（provision済みイメージを焼けば短縮可能）
+
+## フェーズ7: 環境の引き継ぎ（wtx up --from）
+
+Docker Volume スナップショットによるブランチ別DB分離（LayerX方式:
+https://zenn.dev/layerx/articles/6539bf1842f1e0）を、VM clone で包含する形で実現。
+ゴールデンVMの代わりに既存VMを clone するので、volume（DBデータ）だけでなく
+pull済みイメージ・導入済みツールも新VMに乗る。volume 単位のストリーム転送
+（VM間で tar をパイプ）も検討したが、イメージが引き継げず速度も出ないため不採用。
+
+- **同一メインリポジトリの worktree 同士が最危険パス**: clone 元の wtx-gitmount unit と
+  `.wtx-local` マーカーが新VMに残ると、初回ブート時に stale unit が clone 元のVMローカル git を
+  共有 `.git` パスに bind し、setup_isolated_git のマーカー判定が誤爆して**新VMが clone 元の
+  git を黙って使い続ける**。seed_cleanup が unit の停止・削除 → overlay の umount →
+  `/var/lib/wtx/git` の削除を setup より前に行う。overlay を剥がせなかった場合は
+  黙って進まず `wtx up` を失敗させる（沈黙の汚染をエラーに変える）
+- **compose の volume 接頭辞**: プロジェクト名（既定はディレクトリ名）が worktree ごとに
+  変わるため、`<src>_*` → `<dst>_*` へ付け替える。`com.docker.compose.project/volume`
+  ラベルを付けて作り直せば compose v2 は既存 volume をそのまま採用することを実機で確認
+  （`docker compose up` 後にサービスから引き継いだデータが読めた）。データ複製は
+  dockerd の metadata.db を壊さないよう `docker volume create` → `_data` を `cp -a`（mv 不可）
+- **一貫性**: clone 元を停止して at-rest のディスクを複製（稼働中の `cp -a` と違い
+  書き込み途中のDBファイルを写す事故が無い）。復帰はバックグラウンドで、
+  実測ダウンタイムは約11秒（stop 00:32:17 → clone 完了・restart 開始 00:32:28）
+- **コンテナは引き継がない**: `docker rm -fv` で全削除（compose が作り直す。
+  `-v` で匿名 volume の蓄積も防ぐ）。引き継ぐ価値があるのは volume とイメージだけ
+
+### 検証（scripts/check-seed.sh、全PASS）
+
+| 項目 | 結果 |
+|---|---|
+| volume 付け替え（wtxseed-a_dbdata → wtxseed-b_dbdata、旧名は消える） | PASS |
+| `docker compose up` が引き継いだ volume を採用、データが読める | PASS（seed.txt = inherited） |
+| clone 元コンテナの除去 / イメージの引き継ぎ（pull 不要） | PASS |
+| 新VMのVMローカル git が自分の名前 / clone 元の残骸なし | PASS |
+| 新VMのコミットが refs/wtx/<B>/* に回収、clone 元の ref と混ざらない | PASS |
+| clone 元のバックグラウンド復帰・volume 無傷 | PASS |
+| `--from`/`--no-clone` の排他、seeded_from のメタ記録 | PASS |

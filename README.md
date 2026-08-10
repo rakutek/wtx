@@ -1,9 +1,12 @@
 # wtx
 
-git worktree ごとに隔離VM（Lima/vz microVM）＋VM内専用dockerdを与えるRust製CLI／TUI。
-Docker Sandboxes のOSS代替（Dockerアカウント・ライセンス・Docker Desktop不要）。
-全メカニズムの実機検証記録は [VERIFICATION.md](VERIFICATION.md)（Docker Sandboxes からの移行理由、
-採用しなかった方式とその失敗理由、摘出したバグまで含む）。
+git worktree × コーディングエージェントの並列開発を快適にするRust製CLI／TUI。
+worktree ごとに独立したVM（Lima/vz microVM）とVM内専用dockerdを与えるので、
+各ブランチが自分のDB・ポート・イメージを持ち、複数エージェントを同時に走らせても衝突しない。
+`wtx up --from` で既存VMを clone すれば、**DBデータ（docker volume）やpull済みイメージごと**
+新しい worktree に引き継げる。Docker Desktop 不要（Docker Sandboxes のOSS代替としても使える）。
+全メカニズムの実機検証記録は [VERIFICATION.md](VERIFICATION.md)（採用しなかった方式と
+その失敗理由、摘出したバグまで含む）。
 
 エージェント用スキル（[skills/wtx/SKILL.md](skills/wtx/SKILL.md)）は `npx skills add rakutek/wtx` で導入できる。
 
@@ -13,6 +16,7 @@ wtx mirror install                                 # 任意: レジストリキ�
 wtx image build                                    # 初回のみ: ゴールデンVM（3〜4分）
 wtx up myapp-feature-a ~/repos/myapp-feature-a     # 以後のVM作成は約8秒
 wtx exec myapp-feature-a -w ~/repos/myapp-feature-a docker compose up -d --wait
+wtx up myapp-feature-b ~/repos/myapp-feature-b --from myapp-feature-a  # DB・イメージごと引き継ぐ
 wtx shell myapp-feature-a                          # 中でclaudeも使える
 wtx sync myapp-feature-a                           # コミットをホストへ回収
 wtx rm myapp-feature-a --with-worktree             # VMとworktreeをまとめて片付ける
@@ -56,6 +60,8 @@ tty なしで1フレームだけ描画して終了する（動作確認用）。
 `scripts/check-worktree-lifecycle.sh` が、作成 → VM内コミット → 回収 → 削除 → 孤児検出 →
 `prune` までを実VMで通しで検証する（VMを2台作って消すので1〜2分）。
 既に孤児VMがあるときは `prune` が既存VMを巻き込む恐れがあるため中止する。
+`scripts/check-seed.sh` は `wtx up --from` の引き継ぎ（volume 付け替え・compose での採用・
+git の非汚染・clone 元の自動復帰）を実VMで検証する。
 
 設計判断ごとの実機検証記録は [VERIFICATION.md](VERIFICATION.md)。
 
@@ -65,13 +71,23 @@ tty なしで1フレームだけ描画して終了する（動作確認用）。
 - **同パスマウント**: virtiofsでホストと同じ絶対パス。worktreeのホスト直接編集は維持される
 - **ゴールデンVM**: `wtx image build` でプロビジョニング済みVMを作り、`wtx up` は `limactl clone`
   するだけ。VM作成が**3〜4分から約8秒**になる（`--no-clone` で毎回プロビジョニング）
-- **隔離git（デフォルト）**: ホストの `.git` は ro マウント。VM内で
+- **環境の引き継ぎ（`wtx up --from SRC`）**: ゴールデンVMの代わりに既存VMを clone し、
+  docker volume（DBデータ）・pull済みイメージ・導入済みツールをまるごと新VMに乗せる。
+  マイグレーション済み・データ投入済みのメインVMから新しい worktree のVMを生やす使い方。
+  clone 元は複製の間だけ停止して at-rest のディスクを写し（稼働中コピーの不整合が無い）、
+  その後バックグラウンドで自動復帰する（実測ダウンタイム約11秒）。compose の volume 名は
+  `<プロジェクト名>_` 接頭辞（既定はディレクトリ名）で worktree ごとに変わるため、
+  自動で新しい名前に付け替える（compose ファイルで `name:` を固定していれば接頭辞は
+  変わらず、そのまま使われる）。clone 元由来のコンテナと隔離git状態は新VMから除去される
+- **隔離git（デフォルト）**: VMは自分専用の index/refs を持ち、VM内コミットがホストの
+  ブランチを動かさない。複数VMが同じリポジトリに同時にコミットしても衝突しない。
+  仕組み: ホストの `.git` を ro マウントし、VM内で
   (1) それを `/run/wtx/base.git` に ro bind して退避 →
   (2) `--shared` clone でVMローカルの複製を作り（objects は alternates 参照＝コピーゼロ）→
   (3) `.git` のパスに bind で被せる。
-  ホストの `.git` は物理的に不変なので、**`.git/hooks` や `.git/config` への注入による
-  ホスト側でのコード実行（VM脱出）・ref破壊・gc事故が構造的に不可能**。
-  linked worktree と通常リポジトリの両方に適用される。旧方式のrw共有は `--share-git`
+  ホストの `.git` は物理的に不変なので、hooks/config の書き換え・ref破壊・gc事故が
+  ホストに及ぶことはない。linked worktree と通常リポジトリの両方に適用される。
+  旧方式のrw共有は `--share-git`
 - **gc保護**: alternates 参照中の object をホストの `git gc` から守るため、`wtx up` 時に
   ホストへ `refs/wtx/keep/<name>/*` を作る（`wtx rm` で削除）
 - **コミット回収**: `wtx sync` が `refs/wtx/<name>/*` に fetch する。ホストのブランチは動かさない
@@ -133,6 +149,12 @@ wtxは何にも依存しない。連携はすべて汎用インターフェー�
 - ゴールデンVMには mirrors 設定が焼き込まれる（`wtx up` 時に certs.d は再適用されるが、
   `daemon.json` の Hub ミラーポートを変えた場合は `wtx image rm && wtx image build` が必要）
 - `wtx exec` はシェル構文を解釈しない（安全なargv素通し）。パイプ等は `bash -c '...'` で渡す
+- clone されたVM（ゴールデン / `--from`）のディスクサイズは clone 元のまま
+  （`--disk` は新規プロビジョニング時のみ有効）。`--memory`/`--cpus` は省略すると
+  clone 元の値を引き継ぐ
+- `--from` の volume 付け替えは `<ディレクトリ名>_` 接頭辞の一致で判定する。
+  `COMPOSE_PROJECT_NAME` 環境変数などwtxから見えない方法でプロジェクト名を
+  変えている場合は付け替わらない（`docker volume` を手で rename する）
 - 資格情報コピーはトークンのスナップショット。VM側でのOAuthリフレッシュがホスト側セッションと
   競合する可能性は未検証
 - ミラーのキャッシュ削除（GC）は未実装。`~/.wtx/mirror-cache` を手動で消す

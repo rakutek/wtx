@@ -26,6 +26,9 @@ pub struct InstanceMeta {
     pub isolated: bool,
     #[serde(default)]
     pub keep_refs: bool,
+    /// `wtx up --from` の clone 元（来歴。空なら通常作成）
+    #[serde(default)]
+    pub seeded_from: String,
 }
 
 pub fn meta_path(name: &str) -> PathBuf {
@@ -37,9 +40,10 @@ pub fn load_meta(name: &str) -> Option<InstanceMeta> {
 }
 
 pub struct UpOpts {
-    pub memory: String,
-    pub cpus: u32,
+    pub memory: Option<String>,
+    pub cpus: Option<u32>,
     pub disk: String,
+    pub from: Option<String>,
     pub share_git: bool,
     pub no_claude: bool,
     pub no_clone: bool,
@@ -99,6 +103,128 @@ pub fn image_status() {
     }
 }
 
+/// 停止中のVMを clone する引数列。clone 後の lima.yaml は解決済み形式なので
+/// テンプレートで上書きはできず、マウントは --mount-only で差し替える
+/// （ゆえに全マウントはホストと同じ絶対パスに置く）。--memory/--cpus は
+/// 明示されたときだけ渡し、省略時は clone 元の値を引き継ぐ。
+fn clone_args(src: &str, name: &str, o: &UpOpts, mounts: &[Mount]) -> Vec<String> {
+    let mut args: Vec<String> = vec!["clone".into(), src.into(), name.into()];
+    if let Some(mem) = &o.memory {
+        args.push("--memory".into());
+        args.push(mem.trim_end_matches("GiB").to_string());
+    }
+    if let Some(c) = o.cpus {
+        args.push("--cpus".into());
+        args.push(c.to_string());
+    }
+    for m in mounts {
+        args.push("--mount-only".into());
+        args.push(if m.writable {
+            format!("{}:w", m.location)
+        } else {
+            m.location.clone()
+        });
+    }
+    args
+}
+
+/// docker compose の既定プロジェクト名（ディレクトリ名を小文字化し、英数と -_ 以外を除去）。
+/// compose はこれを volume 名の接頭辞に使うため、worktree のディレクトリ名が変わると
+/// 同じ compose ファイルでも volume 名が変わる。
+fn compose_project_name(dir: &Path) -> String {
+    let base = dir
+        .file_name()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let cleaned: String = base
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        .collect();
+    cleaned.trim_start_matches(|c: char| !c.is_ascii_alphanumeric()).to_string()
+}
+
+/// `--from` で clone したVMから clone 元由来の状態を取り除き、compose の volume 名を
+/// 新しい worktree のプロジェクト名に付け替える。setup_isolated_git より前に呼ぶこと:
+/// clone 元の .wtx-local マーカーが残っていると同一メインリポジトリの worktree で
+/// マーカー判定が誤爆し、新VMが clone 元のVMローカル git を使い続けてしまう。
+fn seed_cleanup(name: &str, src: &str, workdir: &Path) -> Result<()> {
+    let src_meta = load_meta(src);
+    let old_gitdir = src_meta
+        .as_ref()
+        .filter(|m| !m.main_repo.is_empty())
+        .map(|m| format!("{}/.git", m.main_repo))
+        .unwrap_or_default();
+    let src_project = src_meta
+        .as_ref()
+        .map(|m| compose_project_name(Path::new(&m.workdir)))
+        .unwrap_or_default();
+    let dst_project = compose_project_name(workdir);
+
+    let script = format!(
+        r#"set -eu
+OLDGIT={oldgit}
+SRC={src}
+DST={dst}
+
+# clone 元の隔離git状態を除去する。unit の停止・削除はベストエフォートだが、
+# 剥がせない overlay を残したまま進むと git が黙って clone 元の状態を指すので、
+# その場合だけは失敗させる。
+sudo systemctl disable --now wtx-gitmount.service >/dev/null 2>&1 || true
+sudo rm -f /etc/systemd/system/wtx-gitmount.service /usr/local/sbin/wtx-gitmount
+sudo systemctl daemon-reload >/dev/null 2>&1 || true
+if [ -n "$OLDGIT" ]; then
+  n=0
+  while [ -e "$OLDGIT/.wtx-local" ] && [ $n -lt 5 ]; do
+    sudo umount "$OLDGIT" 2>/dev/null || true
+    n=$((n+1))
+  done
+  if [ -e "$OLDGIT/.wtx-local" ]; then
+    echo "wtx: could not remove the stale git overlay at $OLDGIT" >&2
+    exit 1
+  fi
+fi
+if mountpoint -q /run/wtx/base.git 2>/dev/null; then sudo umount /run/wtx/base.git || true; fi
+sudo rm -rf /var/lib/wtx/git
+
+# docker: コンテナは作り直せばよい（compose が再作成する）。引き継ぐ価値があるのは
+# volume（DBデータ）とイメージなので、コンテナと不要ネットワークだけ消す。
+n=0
+until docker info >/dev/null 2>&1; do
+  n=$((n+1))
+  if [ $n -ge 120 ]; then echo "wtx: dockerd did not come up in the seeded VM" >&2; exit 1; fi
+  sleep 1
+done
+docker ps -aq | xargs -r docker rm -fv >/dev/null
+docker network prune -f >/dev/null 2>&1 || true
+
+# compose の volume は <プロジェクト名>_ が接頭辞。worktree のディレクトリ名が変わると
+# 参照名も変わるので、clone 元プロジェクトの volume を新しい名前に付け替える。
+# （compose ファイルで name: を固定しているプロジェクトは接頭辞が一致せず、単にスキップされる）
+if [ -n "$SRC" ] && [ "$SRC" != "$DST" ]; then
+  docker volume ls -q | while IFS= read -r v; do
+    case "$v" in
+    "$SRC"_*)
+      suffix="${{v#"$SRC"_}}"
+      nv="${{DST}}_$suffix"
+      docker volume create \
+        --label "com.docker.compose.project=$DST" \
+        --label "com.docker.compose.volume=$suffix" \
+        "$nv" >/dev/null
+      sudo cp -a "/var/lib/docker/volumes/$v/_data/." "/var/lib/docker/volumes/$nv/_data/"
+      docker volume rm "$v" >/dev/null
+      echo "wtx: volume $v -> $nv"
+      ;;
+    esac
+  done
+fi
+"#,
+        oldgit = shq(&old_gitdir),
+        src = shq(&src_project),
+        dst = shq(&dst_project),
+    );
+    crate::sshx::vm_script(name, &script, None)
+}
+
 pub fn up(name: &str, workdir: &str, o: UpOpts) -> Result<()> {
     let workdir = std::fs::canonicalize(workdir)?;
     if !workdir.is_dir() {
@@ -139,32 +265,46 @@ pub fn up(name: &str, workdir: &str, o: UpOpts) -> Result<()> {
     }
 
     let yaml = wtx_home().join(format!("{name}.yaml"));
-    render_yaml(&mounts, o.cpus, &o.memory, &o.disk, &yaml)?;
+    render_yaml(&mounts, o.cpus.unwrap_or(2), o.memory.as_deref().unwrap_or("4GiB"), &o.disk, &yaml)?;
 
     let status = lima_status(name);
-    if !status.is_empty() {
+    if let Some(src) = o.from.as_deref() {
+        // 既存VMを clone して DB（volume）・イメージ・導入済みツールごと引き継ぐ。
+        // 停止中のディスクを複製するので at-rest の一貫したコピーになる。
+        if !status.is_empty() {
+            return Err(anyhow!("{name} already exists; --from can only seed a new VM"));
+        }
+        if src == name {
+            return Err(anyhow!("--from {src}: cannot seed a VM from itself"));
+        }
+        let src_status = lima_status(src);
+        if src_status.is_empty() {
+            return Err(anyhow!("--from {src}: no such VM"));
+        }
+        let was_running = src_status == "Running";
+        if was_running {
+            println!("stopping {src} for a consistent copy (it restarts in the background)...");
+            limactl(&["stop", src])?;
+        }
+        let args = clone_args(src, name, &o, &mounts);
+        limactl(&args.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
+        if was_running {
+            // 新VMの起動と並行して clone 元を復帰させ、ダウンタイムを clone の間だけにする
+            let _ = std::process::Command::new("limactl")
+                .args(["start", "--tty=false", src])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
+        limactl(&["start", name, "--tty=false"])?;
+        seed_cleanup(name, src, &workdir)?;
+    } else if !status.is_empty() {
         // 既存インスタンスへの再アタッチ（マウント構成は作成時のもの）
         if status != "Running" {
             limactl(&["start", name, "--tty=false"])?;
         }
     } else if !o.no_clone && golden_usable() {
-        // プロビジョニング済みVMを clone し、マウントだけ差し替えて起動する。
-        // clone 後の lima.yaml は解決済み形式なのでテンプレートで上書きはできず、
-        // --mount-only で指定する（ゆえに全マウントはホストと同じ絶対パスに置く）。
-        let mem = o.memory.trim_end_matches("GiB").to_string();
-        let cpus = o.cpus.to_string();
-        let mut args: Vec<String> = vec![
-            "clone".into(), GOLDEN.into(), name.into(),
-            "--memory".into(), mem, "--cpus".into(), cpus,
-        ];
-        for m in &mounts {
-            args.push("--mount-only".into());
-            args.push(if m.writable {
-                format!("{}:w", m.location)
-            } else {
-                m.location.clone()
-            });
-        }
+        let args = clone_args(GOLDEN, name, &o, &mounts);
         limactl(&args.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
         limactl(&["start", name, "--tty=false"])?;
     } else {
@@ -177,6 +317,7 @@ pub fn up(name: &str, workdir: &str, o: UpOpts) -> Result<()> {
     let mut meta = InstanceMeta {
         workdir: workdir.to_string_lossy().into_owned(),
         isolated,
+        seeded_from: o.from.clone().unwrap_or_default(),
         ..Default::default()
     };
     if let Some(r) = &repo {

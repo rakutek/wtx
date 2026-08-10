@@ -1,24 +1,28 @@
 ---
 name: wtx
 description: >-
-  Use the `wtx` CLI to give each git worktree an isolated microVM (Lima/vz)
-  with its own in-VM dockerd, isolated git, and a built-in pull-through
-  registry cache. Use when the user says "wtx", "隔離VM", "worktreeをVMで隔離",
-  "worktreeをサンドボックス化", "VM内でdocker", "VM内でエージェントを走らせる",
-  "Docker Sandboxesの代替", "コミットを回収 / wtx sync", "ゴールデンVM",
-  "レジストリミラー / pull-throughキャッシュ", or wants to run untrusted
-  agents/code against a worktree without exposing the host. Boundary: use
-  orca-cli when the task is about Orca-managed worktrees/terminals/handoffs
-  (Orca can call wtx from its terminals); use plain `git worktree` when no VM
-  isolation is needed.
+  Use the `wtx` CLI to give each git worktree its own microVM (Lima/vz) with a
+  dedicated in-VM dockerd, so parallel worktree × coding-agent development does
+  not collide on DBs, ports or images. A new worktree VM can be seeded from an
+  existing one (`wtx up --from`: DB volumes, images and installed tools carry
+  over). Use when the user says "wtx", "worktreeごとにVM", "worktreeごとにDB",
+  "DBを引き継いでworktreeを生やす", "VM内でdocker",
+  "VM内でエージェントを走らせる", "Docker Sandboxesの代替",
+  "コミットを回収 / wtx sync", "ゴールデンVM",
+  "レジストリミラー / pull-throughキャッシュ", or wants parallel agents each
+  with their own database and ports. Boundary: use orca-cli when the task is
+  about Orca-managed worktrees/terminals/handoffs (Orca can call wtx from its
+  terminals); use plain `git worktree` when no per-worktree VM/docker is
+  needed.
 ---
 
 # wtx
 
-git worktree ごとに隔離VM（Lima vz microVM）＋VM内専用 dockerd を与える CLI／TUI。
-Docker Sandboxes の OSS 代替。ホストと同じ絶対パスで worktree をマウントするので、
-ホスト側での直接編集はそのまま使える。VM内には docker（rootful）+ Node 22 +
-Claude Code + git が入っており、エージェントをホストから隔離して走らせられる。
+git worktree × コーディングエージェントの並列開発のための CLI／TUI。worktree ごとに
+独立したVM（Lima vz microVM）＋VM内専用 dockerd を与えるので、各ブランチが自分の
+DB・ポート・イメージを持ち、複数エージェントを同時に走らせても衝突しない。
+ホストと同じ絶対パスで worktree をマウントするので、ホスト側での直接編集はそのまま使える。
+VM内には docker（rootful）+ Node 22 + Claude Code + git が入っている。
 
 コマンドやフラグを暗記や推測で書かないこと。実行前に `wtx --help` /
 `wtx <cmd> --help` で確認する。例外は `wtx image` と `wtx mirror` の
@@ -40,6 +44,7 @@ wtx image build                # ゴールデンVM構築（3〜4分）
 
 ```bash
 wtx up NAME ~/repos/worktree-dir       # VM作成・起動（worktree自動判別、隔離git適用）
+wtx up NAME2 ~/repos/dir2 --from NAME  # 既存VMからDB(volume)・イメージごと引き継いで作成
 wtx exec NAME -w ~/repos/worktree-dir docker compose up -d --wait
 wtx shell NAME                         # 対話シェル（中で claude も使える）
 wtx sync NAME                          # VM内コミットをホストの refs/wtx/NAME/* へ回収
@@ -55,9 +60,24 @@ wtx                                    # 引数なしで ratatui コンソール
 
 - `wtx exec` は **argv 素通し**でシェル構文を解釈しない。パイプ・glob・リダイレクトは
   `wtx exec NAME bash -c '...'` の形で渡す。終了コードは素通しされる。
-- `wtx up` の主なフラグ: `--memory/--cpus/--disk`、`--share-git`（隔離git無効化・旧方式）、
-  `--no-claude`（資格情報コピーなし）、`--no-clone`（clone せず新規プロビジョニング）。
+- `wtx up` の主なフラグ: `--from`（既存VMから環境を引き継ぐ）、`--memory/--cpus`
+  （省略時は新規 4GiB/2、clone は元の値を引き継ぐ）、`--disk`（新規プロビジョニング時のみ）、
+  `--share-git`（隔離git無効化・旧方式）、`--no-claude`（資格情報コピーなし）、
+  `--no-clone`（clone せず新規プロビジョニング。`--from` と排他）。
   追加マウントは位置引数で、`:ro` を付けると読み取り専用（reviewer 用 VM に使う）。
+
+## 環境の引き継ぎ（`wtx up --from`）
+
+`wtx up NAME WORKDIR --from SRC` はゴールデンVMの代わりに既存VM SRC を clone する。
+docker volume（DBデータ）・pull済みイメージ・導入済みツールが新VMに乗るので、
+マイグレーション済み・データ投入済みの「メインVM」から新しい worktree のVMを生やすのが基本形。
+
+- SRC は複製の間だけ停止し（約10秒）、バックグラウンドで自動復帰する。`wtx ls` で確認
+- compose の volume 名接頭辞（プロジェクト名 = ディレクトリ名）は自動で新側に付け替わる。
+  compose ファイルで `name:` を固定している場合は接頭辞が変わらないのでそのまま使われる
+- clone 元のコンテナは新VMでは消される（`docker compose up` で作り直す）。
+  引き継がれるのは volume とイメージ
+- `COMPOSE_PROJECT_NAME` 環境変数でプロジェクト名を変えている場合は付け替え対象にならない
 
 ## worktree を消したときの後始末
 

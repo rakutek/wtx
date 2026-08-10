@@ -1,5 +1,6 @@
-//! wtx — git worktree ごとの隔離VM（Lima/vz）+ VM内dockerd + 内蔵レジストリキャッシュ。
-//! Docker Sandboxes のOSS代替。設計と検証記録は ../myapp/VERIFICATION.md を参照。
+//! wtx — worktree × コーディングエージェントの並列開発ツール。
+//! worktree ごとに独立VM（Lima/vz）+ VM内dockerd を与え、`up --from` で
+//! DB（volume）・イメージごと環境を引き継げる。設計と検証記録は VERIFICATION.md を参照。
 mod creds;
 mod gitiso;
 mod launchd;
@@ -31,12 +32,19 @@ enum Cmd {
         workdir: String,
         /// Extra mounts (append :ro for read-only)
         mounts: Vec<String>,
-        #[arg(long, default_value = "4GiB")]
-        memory: String,
-        #[arg(long, default_value_t = 2)]
-        cpus: u32,
+        /// Memory (default 4GiB; cloned VMs inherit their source unless set)
+        #[arg(long)]
+        memory: Option<String>,
+        /// CPUs (default 2; cloned VMs inherit their source unless set)
+        #[arg(long)]
+        cpus: Option<u32>,
+        /// Disk size for freshly provisioned VMs (cloned VMs keep their source's disk)
         #[arg(long, default_value = "20GiB")]
         disk: String,
+        /// Seed from an existing VM: clone its disk so docker volumes (DB data),
+        /// images and installed tools carry over (the source is stopped briefly)
+        #[arg(long, conflicts_with = "no_clone")]
+        from: Option<String>,
         /// Disable isolated git and share the host .git read-write (legacy mode)
         #[arg(long)]
         share_git: bool,
@@ -127,11 +135,11 @@ fn run() -> Result<()> {
                 tui::run()
             }
         }
-        Some(Cmd::Up { name, workdir, mounts, memory, cpus, disk, share_git, no_claude, no_clone }) => {
+        Some(Cmd::Up { name, workdir, mounts, memory, cpus, disk, from, share_git, no_claude, no_clone }) => {
             lima::up(
                 &name,
                 &workdir,
-                lima::UpOpts { memory, cpus, disk, share_git, no_claude, no_clone, extra_mounts: mounts },
+                lima::UpOpts { memory, cpus, disk, from, share_git, no_claude, no_clone, extra_mounts: mounts },
             )
         }
         Some(Cmd::Exec { name, workdir, cmd }) => sshx::exec(&name, workdir.as_deref(), &cmd),
