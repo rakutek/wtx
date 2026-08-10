@@ -2,6 +2,7 @@
 //! 起動/停止・sync・削除・シェル起動を1画面で操作する。
 use crate::lima::{self, Instance};
 use crate::mirror;
+use crate::util::pad;
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
@@ -165,7 +166,7 @@ fn event_loop<B: Backend + std::io::Write>(term: &mut Terminal<B>) -> Result<()>
                 if let Some(name) = app.selected_vm().map(|i| i.name.clone()) {
                     app.status = format!("deleting {name}...");
                     term.draw(|f| draw(f, &mut app))?;
-                    app.status = match lima::rm(&name) {
+                    app.status = match lima::rm(&name, false, false) {
                         Ok(_) => format!("deleted {name}"),
                         Err(e) => format!("delete failed: {e}"),
                     };
@@ -271,8 +272,8 @@ fn draw(f: &mut Frame, app: &mut App) {
     );
     f.render_widget(
         Paragraph::new(format!(
-            "    {:<24}{:<10}{:<10}{}",
-            "NAME", "STATUS", "GIT", "BRANCH"
+            "    {:<24}{:<10}{:<10}{:<16}{}",
+            "NAME", "STATUS", "GIT", "BRANCH", ""
         ))
         .style(Style::new().bold().fg(Color::Yellow)),
         chunks[1],
@@ -317,11 +318,18 @@ fn draw(f: &mut Frame, app: &mut App) {
                 } else {
                     "shared"
                 };
-                ListItem::new(Line::from(vec![
+                let mut spans = vec![
                     Span::raw(format!("  {}", pad(&i.name, 24))),
                     Span::styled(pad(&i.status, 10), Style::new().fg(color)),
-                    Span::raw(format!("{}{}", pad(git, 10), i.branch)),
-                ]))
+                    Span::raw(format!("{}{}", pad(git, 10), pad(&i.branch, 16))),
+                ];
+                if i.orphaned {
+                    spans.push(Span::styled(
+                        "orphaned",
+                        Style::new().fg(Color::Red).bold(),
+                    ));
+                }
+                ListItem::new(Line::from(spans))
             }
         })
         .collect();
@@ -337,7 +345,9 @@ fn draw(f: &mut Frame, app: &mut App) {
             "workdir : {}\nrepo    : {}\ngit     : {}",
             i.workdir,
             if i.repo.is_empty() { "-" } else { &i.repo },
-            if i.isolated {
+            if i.orphaned {
+                "ORPHANED: the worktree is gone. Press y to fetch commits, then delete it"
+            } else if i.isolated {
                 "isolated (host .git stays untouched; press y to fetch commits)"
             } else {
                 "shared or not a git repo"
@@ -382,12 +392,6 @@ fn draw(f: &mut Frame, app: &mut App) {
             area,
         );
     }
-}
-
-/// 表示幅（全角=2）で右埋めする。`{:<n}` は文字数で数えるため、日本語ラベルで列がずれる。
-fn pad(s: &str, width: usize) -> String {
-    let w = unicode_width::UnicodeWidthStr::width(s);
-    format!("{s}{}", " ".repeat(width.saturating_sub(w)))
 }
 
 fn compact_path(p: &str) -> String {

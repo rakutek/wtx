@@ -17,6 +17,12 @@ pub fn shq(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+/// 表示幅（全角=2）で右埋めする。`{:<n}` は文字数で数えるため列がずれることがある。
+pub fn pad(s: &str, width: usize) -> String {
+    let w = unicode_width::UnicodeWidthStr::width(s);
+    format!("{s}{}", " ".repeat(width.saturating_sub(w)))
+}
+
 pub fn limactl(args: &[&str]) -> Result<()> {
     let st = Command::new("limactl").args(args).status()?;
     if !st.success() {

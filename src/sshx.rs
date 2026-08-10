@@ -45,6 +45,19 @@ pub fn vm_script(name: &str, script: &str, extra_stdin: Option<&[u8]>) -> Result
     Ok(())
 }
 
+/// VM 内でコマンドを実行し、標準出力を取り込む（wtx 自身が結果を使う用途）。
+pub fn capture(name: &str, remote: &str) -> Result<String> {
+    let mut args = ssh_base(name);
+    args.push(format!("lima-{name}"));
+    args.push("--".into());
+    args.push(remote.to_string());
+    let out = Command::new("ssh").args(&args).stderr(Stdio::null()).output()?;
+    if !out.status.success() {
+        return Err(anyhow!("remote command failed: {remote}"));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 /// VM 内でコマンドを実行する。終了コードはそのまま素通しする（オーケストレータ連携の契約）。
 pub fn exec(name: &str, workdir: Option<&str>, cmd: &[String]) -> Result<()> {
     let quoted: Vec<String> = cmd.iter().map(|s| shq(s)).collect();

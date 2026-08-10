@@ -15,7 +15,9 @@ wtx up myapp-feature-a ~/repos/myapp-feature-a     # 以後のVM作成は約8秒
 wtx exec myapp-feature-a -w ~/repos/myapp-feature-a docker compose up -d --wait
 wtx shell myapp-feature-a                          # 中でclaudeも使える
 wtx sync myapp-feature-a                           # コミットをホストへ回収
-wtx rm myapp-feature-a
+wtx rm myapp-feature-a --with-worktree             # VMとworktreeをまとめて片付ける
+wtx ls                                             # 孤児VM（worktree消失）も表示
+wtx prune --yes                                    # 孤児VMを掃除（未回収コミットがあればスキップ）
 wtx                                                # 引数なしで ratatui コンソール
 ```
 
@@ -94,7 +96,14 @@ wtxは何にも依存しない。連携はすべて汎用インターフェー�
 - VMとホストは**同じ作業ツリーを共有しつつ、別々のindex/refsを持つ**。VM内でコミットしても
   ホストのブランチは動かないので、ホスト側 `git status` にはVMの変更が未コミットとして見える。
   回収は `wtx sync` → `git merge --ff-only refs/wtx/<name>/<branch>`
-- VMを削除するとVMローカルのコミットも消える。`wtx rm` の前に `wtx sync` すること
+- VMを削除するとVMローカルのコミットも消えるため、**`wtx rm` は未回収コミットがあると拒否する**
+  （`wtx sync` してから、または `--force` で破棄）。VMが停止中は問い合わせられないので判定を省く
+- **worktree を消してもVMは残る**（gitにフックが無いため連動できない）。`wtx ls` と TUI は
+  そうしたVMを `orphaned` と表示し、`wtx prune` でまとめて掃除できる。
+  片付けを一度で済ませたいときは `wtx rm NAME --with-worktree`（linked worktree のときだけ畳む。
+  通常リポジトリでは本体を消さないよう何もしない）
+- 孤児VMからでも `wtx sync` は動く。隔離モードの fetch 元はVMローカル git（`/var/lib/wtx/git/<name>`）で、
+  worktree の有無に依存しない
 - 通常リポジトリ（非worktree）モードでは、VM起動直後に `wtx-gitmount.service` が bind を張り直すまでの
   ごく短い間だけホストの `.git` がVMから書き込み可能になる。worktree モードは Lima のマウント自体が
   ro なのでこの窓は無い

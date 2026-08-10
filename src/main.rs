@@ -76,7 +76,24 @@ enum Cmd {
     /// Stop a VM
     Stop { name: String },
     /// Delete a VM (its databases and images go with it)
-    Rm { name: String },
+    Rm {
+        name: String,
+        /// Also remove the linked git worktree the VM was created from
+        #[arg(long)]
+        with_worktree: bool,
+        /// Delete even if the VM holds commits that were never fetched to the host
+        #[arg(long)]
+        force: bool,
+    },
+    /// Delete VMs whose worktree no longer exists (skips VMs with unfetched commits)
+    Prune {
+        /// Actually delete them (without this, only report what would be deleted)
+        #[arg(long)]
+        yes: bool,
+        /// Skip the unfetched-commit check
+        #[arg(long)]
+        force: bool,
+    },
     /// Pre-provisioned golden VM (build|rm|status); wtx up clones it for fast startup
     Image {
         #[arg(default_value = "status")]
@@ -119,13 +136,17 @@ fn run() -> Result<()> {
         }
         Some(Cmd::Exec { name, workdir, cmd }) => sshx::exec(&name, workdir.as_deref(), &cmd),
         Some(Cmd::Shell { name }) => sshx::shell(&name),
-        Some(Cmd::Ls) => util::limactl(&["list"]),
+        Some(Cmd::Ls) => {
+            lima::ls();
+            Ok(())
+        }
         Some(Cmd::Sync { name }) => lima::sync(&name),
         Some(Cmd::Forward { name, spec }) => sshx::forward(&name, &spec, false),
         Some(Cmd::Bridge { name, spec }) => sshx::forward(&name, &spec, true),
         Some(Cmd::Unforward { name, port }) => sshx::unforward(&name, &port),
         Some(Cmd::Stop { name }) => util::limactl(&["stop", &name]),
-        Some(Cmd::Rm { name }) => lima::rm(&name),
+        Some(Cmd::Rm { name, with_worktree, force }) => lima::rm(&name, with_worktree, force),
+        Some(Cmd::Prune { yes, force }) => lima::prune(force, yes),
         Some(Cmd::Image { action }) => match action.as_str() {
             "build" => lima::image_build(),
             "rm" => lima::image_rm(),

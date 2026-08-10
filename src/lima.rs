@@ -208,8 +208,32 @@ pub fn up(name: &str, workdir: &str, o: UpOpts) -> Result<()> {
     Ok(())
 }
 
-pub fn rm(name: &str) -> Result<()> {
-    if let Some(m) = load_meta(name) {
+/// 回収されていないVM内コミットがあれば、そのブランチ名を返す。
+/// 停止中のVMは問い合わせられないので空（判定不能）を返す。
+fn pending_commits(name: &str, meta: &InstanceMeta) -> Vec<String> {
+    if !meta.isolated || meta.main_repo.is_empty() || lima_status(name) != "Running" {
+        return vec![];
+    }
+    let repo = Path::new(&meta.main_repo);
+    if !repo.exists() {
+        return vec![];
+    }
+    gitiso::unfetched_branches(name, repo).unwrap_or_default()
+}
+
+pub fn rm(name: &str, with_worktree: bool, force: bool) -> Result<()> {
+    let meta = load_meta(name);
+    if let Some(m) = &meta {
+        if !force {
+            let pending = pending_commits(name, m);
+            if !pending.is_empty() {
+                return Err(anyhow!(
+                    "{name} has commits not yet fetched to the host ({}). \
+                     Run `wtx sync {name}` first, or pass --force to discard them",
+                    pending.join(", ")
+                ));
+            }
+        }
         if m.keep_refs && !m.main_repo.is_empty() {
             gitiso::unpin_host_objects(Path::new(&m.main_repo), name);
         }
@@ -218,6 +242,29 @@ pub fn rm(name: &str) -> Result<()> {
     limactl(&["delete", "-f", name])?;
     let _ = std::fs::remove_file(wtx_home().join(format!("{name}.yaml")));
     let _ = std::fs::remove_file(meta_path(name));
+
+    if with_worktree {
+        let Some(m) = meta else {
+            return Err(anyhow!("no metadata for {name}; cannot locate the worktree"));
+        };
+        // linked worktree のときだけ畳む。通常リポジトリで消すと本体を消してしまう。
+        if m.main_repo.is_empty() || m.main_repo == m.workdir {
+            eprintln!("wtx: {name} is not a linked worktree; left {} in place", m.workdir);
+        } else if !Path::new(&m.workdir).exists() {
+            eprintln!("wtx: worktree {} is already gone", m.workdir);
+        } else {
+            let st = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&m.main_repo)
+                .args(["worktree", "remove", "--force", &m.workdir])
+                .status()?;
+            if st.success() {
+                println!("removed worktree {}", m.workdir);
+            } else {
+                eprintln!("wtx: could not remove worktree {} (remove it manually)", m.workdir);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -226,7 +273,89 @@ pub fn sync(name: &str) -> Result<()> {
     if m.main_repo.is_empty() {
         return Err(anyhow!("{name} is not a git VM; nothing to sync"));
     }
-    gitiso::sync(name, Path::new(&m.main_repo), &m.workdir, &m.branch)
+    gitiso::sync(name, Path::new(&m.main_repo), &m.workdir, &m.branch, m.isolated)
+}
+
+/// worktree が消えた（孤児）VM を掃除する。
+/// 未回収コミットが残っているVMは既定でスキップする。
+pub fn prune(force: bool, yes: bool) -> Result<()> {
+    let orphans: Vec<Instance> = list_instances().into_iter().filter(|i| i.orphaned).collect();
+    if orphans.is_empty() {
+        println!("no orphaned VMs");
+        return Ok(());
+    }
+    for i in &orphans {
+        let Some(meta) = load_meta(&i.name) else { continue };
+        if !force {
+            if meta.isolated && lima_status(&i.name) != "Running" {
+                println!("starting {} to check for unfetched commits...", i.name);
+                if let Err(e) = limactl(&["start", &i.name, "--tty=false"]) {
+                    println!("  skip {}: could not start it to verify ({e})", i.name);
+                    continue;
+                }
+            }
+            let pending = pending_commits(&i.name, &meta);
+            if !pending.is_empty() {
+                println!(
+                    "  skip {}: unfetched commits on {} (run `wtx sync {}`)",
+                    i.name,
+                    pending.join(", "),
+                    i.name
+                );
+                continue;
+            }
+        }
+        if !yes {
+            println!("  would delete {} (workdir gone: {})", i.name, i.workdir);
+            continue;
+        }
+        match rm(&i.name, false, true) {
+            Ok(_) => println!("  deleted {}", i.name),
+            Err(e) => println!("  failed to delete {}: {e}", i.name),
+        }
+    }
+    if !yes {
+        println!("re-run with --yes to delete them");
+    }
+    Ok(())
+}
+
+/// wtx が把握しているVM一覧（孤児かどうかを含む）。
+pub fn ls() {
+    let rows = list_instances();
+    if rows.is_empty() {
+        println!("no VMs. Create one with `wtx up NAME WORKDIR`");
+        return;
+    }
+    println!(
+        "{}{}{}{}",
+        pad("NAME", 24),
+        pad("STATUS", 10),
+        pad("GIT", 10),
+        pad("BRANCH", 16)
+    );
+    for i in &rows {
+        let git = if i.isolated {
+            "isolated"
+        } else if i.workdir.is_empty() {
+            "-"
+        } else {
+            "shared"
+        };
+        let suffix = if i.orphaned { "  (orphaned: workdir gone)" } else { "" };
+        println!(
+            "{}{}{}{}{}{}",
+            pad(&i.name, 24),
+            pad(&i.status, 10),
+            pad(git, 10),
+            pad(&i.branch, 16),
+            i.workdir,
+            suffix
+        );
+    }
+    if rows.iter().any(|i| i.orphaned) {
+        println!("\norphaned VMs can be cleaned up with `wtx prune`");
+    }
 }
 
 /// TUI 用のインスタンス一覧。
@@ -239,6 +368,8 @@ pub struct Instance {
     pub isolated: bool,
     /// プロジェクト（ホスト側リポジトリルート）。TUI のグループ化キー。
     pub repo: String,
+    /// worktree が消えているVM。VM内のコミットが取り残されている可能性がある。
+    pub orphaned: bool,
 }
 
 pub fn list_instances() -> Vec<Instance> {
@@ -247,9 +378,11 @@ pub fn list_instances() -> Vec<Instance> {
         .filter_map(|l| {
             let (name, status) = l.split_once('\t')?;
             let meta = load_meta(name);
+            let workdir = meta.as_ref().map(|m| m.workdir.clone()).unwrap_or_default();
             Some(Instance {
                 name: name.to_string(),
                 status: status.to_string(),
+                orphaned: !workdir.is_empty() && !Path::new(&workdir).exists(),
                 workdir: meta.as_ref().map(|m| m.workdir.clone()).unwrap_or_default(),
                 branch: meta.as_ref().map(|m| m.branch.clone()).unwrap_or_default(),
                 repo: meta.as_ref().map(|m| m.main_repo.clone()).unwrap_or_default(),

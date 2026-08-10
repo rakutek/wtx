@@ -43,7 +43,9 @@ wtx up NAME ~/repos/worktree-dir       # VM作成・起動（worktree自動判�
 wtx exec NAME -w ~/repos/worktree-dir docker compose up -d --wait
 wtx shell NAME                         # 対話シェル（中で claude も使える）
 wtx sync NAME                          # VM内コミットをホストの refs/wtx/NAME/* へ回収
-wtx rm NAME                            # VM削除（DB・イメージごと消える）
+wtx rm NAME [--with-worktree]          # VM削除（DB・イメージごと消える。worktreeも畳む）
+wtx ls                                 # 一覧（worktreeが消えたVMは orphaned と表示）
+wtx prune --yes                        # 孤児VMを掃除（未回収コミットがあるVMはスキップ）
 wtx                                    # 引数なしで ratatui コンソール
 ```
 
@@ -56,6 +58,18 @@ wtx                                    # 引数なしで ratatui コンソール
 - `wtx up` の主なフラグ: `--memory/--cpus/--disk`、`--share-git`（隔離git無効化・旧方式）、
   `--no-claude`（資格情報コピーなし）、`--no-clone`（clone せず新規プロビジョニング）。
   追加マウントは位置引数で、`:ro` を付けると読み取り専用（reviewer 用 VM に使う）。
+
+## worktree を消したときの後始末
+
+`git worktree remove` に hook は無いため、**worktree を消してもVMは残る**。残ったVMはマウント先が
+空になり、VM内のコミットが取り残される。
+
+- `wtx ls` / TUI は該当VMを `orphaned` と表示する
+- 孤児VMからでも `wtx sync NAME` は動く（fetch 元はVMローカル git で worktree に依存しない）
+- `wtx prune --yes` で孤児VMを削除。**未回収コミットがあるVMは自動でスキップ**され、
+  `wtx sync` を促す（確認を省くなら `--force`）
+- 最初から一度で片付けるなら `wtx rm NAME --with-worktree`
+- `wtx rm` は未回収コミットがあると拒否する（`--force` で破棄）
 
 ## 隔離 git の運用（データ消失に直結する注意）
 

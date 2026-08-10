@@ -190,18 +190,54 @@ pub fn unpin_host_objects(host_repo: &Path, name: &str) {
     }
 }
 
+/// VM 内のVMローカル git の絶対パス。worktree が消えても残るので、
+/// 孤児VMからのコミット回収はここを起点にする。
+pub fn vm_git_path(vm: &str) -> String {
+    format!("/var/lib/wtx/git/{vm}")
+}
+
+/// まだホストに取り込まれていないVM内ブランチを返す（`wtx rm` / `prune` の安全弁）。
+/// VMローカル git のブランチ先端が、ホスト側リポジトリに object として存在するかで判定する。
+pub fn unfetched_branches(vm: &str, host_repo: &Path) -> Result<Vec<String>> {
+    let out = crate::sshx::capture(
+        vm,
+        &format!(
+            "git -C {} for-each-ref --format='%(objectname) %(refname:short)' refs/heads/",
+            shq(&vm_git_path(vm))
+        ),
+    )?;
+    let mut pending = vec![];
+    for line in out.lines() {
+        let Some((sha, branch)) = line.split_once(' ') else { continue };
+        let known = Command::new("git")
+            .arg("-C")
+            .arg(host_repo)
+            .args(["cat-file", "-e", &format!("{sha}^{{commit}}")])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !known {
+            pending.push(branch.to_string());
+        }
+    }
+    Ok(pending)
+}
+
 /// VM 内のブランチ群を refs/wtx/<name>/* としてホストのリポジトリへ fetch する。
-pub fn sync(name: &str, host_repo: &Path, workdir: &str, branch: &str) -> Result<()> {
+pub fn sync(name: &str, host_repo: &Path, workdir: &str, branch: &str, isolated: bool) -> Result<()> {
     let ssh_cmd = format!(
         "ssh -F {} -o ControlMaster=no -o ControlPath=none",
         shq(&lima_dir(name).join("ssh.config").to_string_lossy())
     );
+    // 隔離モードではVMローカル git を直接指す。worktree が消えた（孤児）VMからでも回収できる。
+    let remote = if isolated { vm_git_path(name) } else { workdir.to_string() };
     let st = Command::new("git")
         .arg("-C")
         .arg(host_repo)
         .args([
             "fetch",
-            &format!("lima-{name}:{workdir}"),
+            &format!("lima-{name}:{remote}"),
             &format!("+refs/heads/*:refs/wtx/{name}/*"),
         ])
         .env("GIT_SSH_COMMAND", ssh_cmd)
@@ -210,7 +246,12 @@ pub fn sync(name: &str, host_repo: &Path, workdir: &str, branch: &str) -> Result
         return Err(anyhow!("git fetch failed"));
     }
     if !branch.is_empty() {
-        println!("to merge: git -C {workdir} merge --ff-only refs/wtx/{name}/{branch}");
+        if Path::new(workdir).exists() {
+            println!("to merge: git -C {workdir} merge --ff-only refs/wtx/{name}/{branch}");
+        } else {
+            // 孤児VM: 元の worktree が無いので、回収先の ref だけ伝える
+            println!("fetched into refs/wtx/{name}/{branch} (the worktree is gone; check it out where you need it)");
+        }
     }
     Ok(())
 }
