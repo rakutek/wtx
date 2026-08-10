@@ -1,0 +1,23 @@
+[package]
+name = "wtx"
+version = "0.2.0"
+edition = "2021"
+description = "worktreeごとの隔離VM (Lima/vz) + VM内dockerd + 内蔵レジストリキャッシュ"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "io-util", "time"] }
+axum = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls"] }
+futures-util = "0.3"
+tokio-util = { version = "0.7", features = ["io"] }
+ratatui = "0.29"
+crossterm = "0.28"
+dirs = "6"
+libc = "0.2"
+
+[profile.release]
+strip = true
