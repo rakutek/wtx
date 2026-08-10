@@ -69,14 +69,14 @@ pub fn golden_usable() -> bool {
 
 pub fn image_build() -> Result<()> {
     if lima_dir(GOLDEN).exists() {
-        return Err(anyhow!("{GOLDEN} は既に存在します（作り直すなら wtx image rm）"));
+        return Err(anyhow!("{GOLDEN} already exists (run `wtx image rm` to rebuild it)"));
     }
     let yaml = wtx_home().join(format!("{GOLDEN}.yaml"));
     render_yaml(&[], 2, "4GiB", "20GiB", &yaml)?;
-    println!("ゴールデンVMをビルドしています（初回のみ、3〜4分）...");
+    println!("Building the golden VM (one-time, 3-4 min)...");
     limactl(&["start", "--name", GOLDEN, "--tty=false", &yaml.to_string_lossy()])?;
     limactl(&["stop", GOLDEN])?; // clone は停止中のインスタンスに対して行う
-    println!("完了: 以後の wtx up は {GOLDEN} を clone します");
+    println!("Done: `wtx up` now clones {GOLDEN}");
     Ok(())
 }
 
@@ -88,13 +88,13 @@ pub fn image_rm() -> Result<()> {
 
 pub fn image_status() {
     if golden_usable() {
-        println!("{GOLDEN}: ready (wtx up は clone で高速起動)");
+        println!("{GOLDEN}: ready (wtx up clones it for fast startup)");
     } else {
         let st = lima_status(GOLDEN);
         if st.is_empty() {
-            println!("{GOLDEN}: 未ビルド — `wtx image build` で作成すると VM 作成が数十秒になります");
+            println!("{GOLDEN}: not built - run `wtx image build` to cut VM creation to seconds");
         } else {
-            println!("{GOLDEN}: {st} — clone には停止が必要です (limactl stop {GOLDEN})");
+            println!("{GOLDEN}: {st} - it must be stopped to be cloned (limactl stop {GOLDEN})");
         }
     }
 }
@@ -105,7 +105,7 @@ pub fn up(name: &str, workdir: &str, o: UpOpts) -> Result<()> {
         return Err(anyhow!("workdir not found: {}", workdir.display()));
     }
     if !mirror::mirror_alive() {
-        eprintln!("wtx: warning: mirror is down — pull は上流に直行します (wtx mirror up)");
+        eprintln!("wtx: warning: mirror is down - pulls go straight upstream (wtx mirror up)");
     }
 
     let repo = gitiso::inspect_repo(&workdir)?;
@@ -132,7 +132,7 @@ pub fn up(name: &str, workdir: &str, o: UpOpts) -> Result<()> {
         };
         let abs = std::fs::canonicalize(loc)?.to_string_lossy().into_owned();
         if mounts.iter().any(|x| x.location == abs) {
-            eprintln!("wtx: {abs} は自動でマウント済みのため無視します");
+            eprintln!("wtx: ignoring {abs}: already mounted automatically");
             continue;
         }
         mounts.push(Mount { location: abs, writable: w });
@@ -169,7 +169,7 @@ pub fn up(name: &str, workdir: &str, o: UpOpts) -> Result<()> {
         limactl(&["start", name, "--tty=false"])?;
     } else {
         if !o.no_clone {
-            eprintln!("wtx: ヒント: `wtx image build` でゴールデンVMを作ると以後の作成が数十秒になります");
+            eprintln!("wtx: hint: `wtx image build` makes later VM creation take seconds");
         }
         limactl(&["start", "--name", name, "--tty=false", &yaml.to_string_lossy()])?;
     }
@@ -186,7 +186,7 @@ pub fn up(name: &str, workdir: &str, o: UpOpts) -> Result<()> {
             gitiso::setup_isolated_git(name, r, &workdir)?;
             match gitiso::pin_host_objects(&r.host_repo, name) {
                 Ok(_) => meta.keep_refs = true,
-                Err(e) => eprintln!("wtx: warning: gc保護refを作成できませんでした: {e}"),
+                Err(e) => eprintln!("wtx: warning: could not create gc-protection refs: {e}"),
             }
         }
     }
@@ -202,7 +202,7 @@ pub fn up(name: &str, workdir: &str, o: UpOpts) -> Result<()> {
 
     println!("ready:\n  wtx shell {name}");
     if isolated {
-        println!("  wtx sync {name}        # VM内のコミットをホストへ回収");
+        println!("  wtx sync {name}        # fetch commits made in the VM back to the host");
     }
     println!("  wtx rm {name}");
     Ok(())

@@ -29,7 +29,7 @@ struct App {
     last_refresh: Instant,
 }
 
-const HELP: &str = "r:更新  s:起動/停止  y:sync  Enter:shell/開閉  Space:開閉  d:削除  q:終了";
+const HELP: &str = "r:refresh  s:start/stop  y:sync  Enter:shell/fold  Space:fold  d:delete  q:quit";
 
 impl App {
     fn new() -> Self {
@@ -71,7 +71,7 @@ impl App {
                 self.state.select(self.rows.len().checked_sub(1));
             }
         }
-        let mode = if crate::launchd::installed() { "launchd" } else { "手動" };
+        let mode = if crate::launchd::installed() { "launchd" } else { "manual" };
         let up: Vec<String> = mirror::mirror_config()
             .into_iter()
             .map(|e| {
@@ -163,16 +163,16 @@ fn event_loop<B: Backend + std::io::Write>(term: &mut Terminal<B>) -> Result<()>
         if app.confirm_delete {
             if k.code == KeyCode::Char('y') {
                 if let Some(name) = app.selected_vm().map(|i| i.name.clone()) {
-                    app.status = format!("{name} を削除中...");
+                    app.status = format!("deleting {name}...");
                     term.draw(|f| draw(f, &mut app))?;
                     app.status = match lima::rm(&name) {
-                        Ok(_) => format!("{name} を削除しました"),
-                        Err(e) => format!("削除失敗: {e}"),
+                        Ok(_) => format!("deleted {name}"),
+                        Err(e) => format!("delete failed: {e}"),
                     };
                     app.refresh();
                 }
             } else {
-                app.status = "キャンセルしました".into();
+                app.status = "cancelled".into();
             }
             app.confirm_delete = false;
             continue;
@@ -181,7 +181,7 @@ fn event_loop<B: Backend + std::io::Write>(term: &mut Terminal<B>) -> Result<()>
             KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
             KeyCode::Char('r') => {
                 app.refresh();
-                app.status = "更新しました".into();
+                app.status = "refreshed".into();
             }
             KeyCode::Down | KeyCode::Char('j') => app.move_sel(1),
             KeyCode::Up | KeyCode::Char('k') => app.move_sel(-1),
@@ -192,14 +192,14 @@ fn event_loop<B: Backend + std::io::Write>(term: &mut Terminal<B>) -> Result<()>
                 if app.selected_vm().is_some() {
                     app.confirm_delete = true;
                 } else {
-                    app.status = "VMを選んでください".into();
+                    app.status = "select a VM first".into();
                 }
             }
             KeyCode::Char('s') => {
                 if let Some(inst) = app.selected_vm().cloned() {
                     let running = inst.status == "Running";
                     app.status =
-                        format!("{} を{}中...", inst.name, if running { "停止" } else { "起動" });
+                        format!("{}ing {}...", if running { "stopp" } else { "start" }, inst.name);
                     term.draw(|f| draw(f, &mut app))?;
                     let r = if running {
                         crate::util::limactl(&["stop", &inst.name])
@@ -207,24 +207,24 @@ fn event_loop<B: Backend + std::io::Write>(term: &mut Terminal<B>) -> Result<()>
                         crate::util::limactl(&["start", &inst.name, "--tty=false"])
                     };
                     app.status = match r {
-                        Ok(_) => format!("{} 完了", inst.name),
-                        Err(e) => format!("失敗: {e}"),
+                        Ok(_) => format!("{} done", inst.name),
+                        Err(e) => format!("failed: {e}"),
                     };
                     app.refresh();
                 } else {
-                    app.status = "VMを選んでください".into();
+                    app.status = "select a VM first".into();
                 }
             }
             KeyCode::Char('y') => {
                 if let Some(name) = app.selected_vm().map(|i| i.name.clone()) {
-                    app.status = format!("{name} を sync 中...");
+                    app.status = format!("syncing {name}...");
                     term.draw(|f| draw(f, &mut app))?;
                     app.status = match lima::sync(&name) {
-                        Ok(_) => format!("{name}: refs/wtx/{name}/* に回収しました"),
-                        Err(e) => format!("sync 失敗: {e}"),
+                        Ok(_) => format!("{name}: fetched into refs/wtx/{name}/*"),
+                        Err(e) => format!("sync failed: {e}"),
                     };
                 } else {
-                    app.status = "VMを選んでください".into();
+                    app.status = "select a VM first".into();
                 }
             }
             KeyCode::Enter => {
@@ -240,7 +240,7 @@ fn event_loop<B: Backend + std::io::Write>(term: &mut Terminal<B>) -> Result<()>
                     execute!(term.backend_mut(), EnterAlternateScreen)?;
                     term.clear()?;
                     app.status = match r {
-                        Ok(_) => format!("{name} のシェルを終了しました"),
+                        Ok(_) => format!("left the shell on {name}"),
                         Err(e) => format!("shell: {e}"),
                     };
                     app.refresh();
@@ -271,7 +271,7 @@ fn draw(f: &mut Frame, app: &mut App) {
     );
     f.render_widget(
         Paragraph::new(format!(
-            "    {:<24}{:<10}{:<8}{}",
+            "    {:<24}{:<10}{:<10}{}",
             "NAME", "STATUS", "GIT", "BRANCH"
         ))
         .style(Style::new().bold().fg(Color::Yellow)),
@@ -285,7 +285,7 @@ fn draw(f: &mut Frame, app: &mut App) {
             Row::Group { key, vms, running } => {
                 let mark = if app.collapsed.contains(key) { "▸" } else { "▾" };
                 let label = if key.is_empty() {
-                    "(プロジェクトなし)".to_string()
+                    "(no project)".to_string()
                 } else {
                     format!(
                         "{}  {}",
@@ -311,16 +311,16 @@ fn draw(f: &mut Frame, app: &mut App) {
                     _ => Color::Yellow,
                 };
                 let git = if i.isolated {
-                    "隔離"
+                    "isolated"
                 } else if i.workdir.is_empty() {
                     "-"
                 } else {
-                    "共有"
+                    "shared"
                 };
                 ListItem::new(Line::from(vec![
                     Span::raw(format!("  {}", pad(&i.name, 24))),
                     Span::styled(pad(&i.status, 10), Style::new().fg(color)),
-                    Span::raw(format!("{}{}", pad(git, 8), i.branch)),
+                    Span::raw(format!("{}{}", pad(git, 10), i.branch)),
                 ]))
             }
         })
@@ -338,22 +338,22 @@ fn draw(f: &mut Frame, app: &mut App) {
             i.workdir,
             if i.repo.is_empty() { "-" } else { &i.repo },
             if i.isolated {
-                "隔離git（ホストの .git は不変。回収は y キー）"
+                "isolated (host .git stays untouched; press y to fetch commits)"
             } else {
-                "共有 or 非git"
+                "shared or not a git repo"
             }
         ),
         Some(Row::Group { key, vms, running }) => {
             if key.is_empty() {
-                format!("リポジトリに紐づかないVM: {vms}台（{running}台稼働）")
+                format!("VMs not tied to a repository: {vms} ({running} running)")
             } else {
                 format!(
-                    "project : {}\nVM      : {vms}台（{running}台稼働）\n新規作成: wtx up <name> <worktree>",
+                    "project : {}\nVMs     : {vms} ({running} running)\nnew VM  : wtx up <name> <worktree>",
                     key
                 )
             }
         }
-        None => "VMがありません。`wtx up NAME WORKDIR` で作成します".to_string(),
+        None => "No VMs yet. Create one with `wtx up NAME WORKDIR`".to_string(),
     };
     f.render_widget(
         Paragraph::new(detail).block(Block::default().borders(Borders::ALL).title(" detail ")),
@@ -371,12 +371,12 @@ fn draw(f: &mut Frame, app: &mut App) {
         f.render_widget(Clear, area);
         f.render_widget(
             Paragraph::new(format!(
-                "\n {name} を削除します（DB・イメージも消えます）\n y = 実行 / その他 = 中止"
+                "\n Delete {name}? Its databases and images go with it.\n y = delete / any other key = cancel"
             ))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(" 確認 ")
+                    .title(" confirm ")
                     .border_style(Style::new().fg(Color::Red)),
             ),
             area,

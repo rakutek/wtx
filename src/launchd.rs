@@ -102,7 +102,7 @@ pub fn install() -> Result<()> {
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
-    println!("mirror: launchd オンデマンド起動を登録しました（常駐プロセスなし）");
+    println!("mirror: registered for launchd on-demand activation (no resident process)");
     Ok(())
 }
 
@@ -116,6 +116,6 @@ pub fn uninstall() -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
     }
-    println!("mirror: launchd 登録を解除しました");
+    println!("mirror: unregistered from launchd");
     Ok(())
 }

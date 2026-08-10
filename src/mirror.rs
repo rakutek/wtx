@@ -317,7 +317,7 @@ pub fn serve() -> Result<()> {
 
 pub fn up() -> Result<()> {
     if mirror_alive() {
-        println!("mirror: up (127.0.0.1:{} ほか)", mirror_port());
+        println!("mirror: up (127.0.0.1:{} and others)", mirror_port());
         return Ok(());
     }
     let self_exe = std::env::current_exe()?;
@@ -333,7 +333,7 @@ pub fn up() -> Result<()> {
         .spawn()?;
     for _ in 0..20 {
         if mirror_alive() {
-            println!("mirror: up (127.0.0.1:{} ほか)", mirror_port());
+            println!("mirror: up (127.0.0.1:{} and others)", mirror_port());
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(250));
@@ -354,9 +354,9 @@ pub fn down() -> Result<()> {
 
 pub fn status() {
     let mode = if crate::launchd::installed() {
-        "launchd オンデマンド（アクセス時に起動、10分アイドルで終了）"
+        "launchd on-demand (starts on access, exits after 10 min idle)"
     } else {
-        "手動 (wtx mirror up)"
+        "manual (wtx mirror up)"
     };
     println!("mode: {mode}");
     for e in mirror_config() {

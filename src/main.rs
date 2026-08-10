@@ -13,7 +13,11 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "wtx", version, about = "worktreeごとの隔離VM + VM内dockerd + 内蔵レジストリキャッシュ")]
+#[command(
+    name = "wtx",
+    version,
+    about = "Per-worktree isolated VMs with in-VM dockerd and a built-in registry cache"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -21,11 +25,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// VMを作成・起動する（worktreeは自動判別され、隔離gitが適用される）
+    /// Create and start a VM (worktrees are detected automatically and get isolated git)
     Up {
         name: String,
         workdir: String,
-        /// 追加マウント（:ro で読み取り専用）
+        /// Extra mounts (append :ro for read-only)
         mounts: Vec<String>,
         #[arg(long, default_value = "4GiB")]
         memory: String,
@@ -33,17 +37,17 @@ enum Cmd {
         cpus: u32,
         #[arg(long, default_value = "20GiB")]
         disk: String,
-        /// 隔離gitを無効化し、ホストの.gitをrw共有する（旧方式）
+        /// Disable isolated git and share the host .git read-write (legacy mode)
         #[arg(long)]
         share_git: bool,
-        /// Claude資格情報をコピーしない
+        /// Do not copy Claude credentials into the VM
         #[arg(long)]
         no_claude: bool,
-        /// ゴールデンVMのcloneを使わず新規プロビジョニングする
+        /// Provision from scratch instead of cloning the golden VM
         #[arg(long)]
         no_clone: bool,
     },
-    /// VM内でコマンドを実行する（終了コードは素通し。シェル構文は bash -c '...'）
+    /// Run a command inside a VM (exit code is passed through; use bash -c '...' for shell syntax)
     Exec {
         name: String,
         #[arg(short = 'w', long)]
@@ -51,34 +55,34 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         cmd: Vec<String>,
     },
-    /// VM内の対話シェルを開く
+    /// Open an interactive shell inside a VM
     Shell { name: String },
-    /// VM一覧
+    /// List VMs
     Ls,
-    /// ratatui コンソールを開く
+    /// Open the ratatui console
     Tui {
-        /// tty を使わず1フレームだけ描画して終了する（動作確認用）
+        /// Render a single frame without a tty and exit (for smoke tests)
         #[arg(long)]
         snapshot: bool,
     },
-    /// VM内のコミットを refs/wtx/<name>/* としてホストへ回収する
+    /// Fetch commits made inside the VM to the host as refs/wtx/<name>/*
     Sync { name: String },
-    /// VMのポートをホストに公開する (ssh -L) HOST:GUEST
+    /// Publish a VM port on the host (ssh -L) HOST:GUEST
     Forward { name: String, spec: String },
-    /// ホストのポートをVM内に露出する (ssh -R) GUEST:HOST
+    /// Expose a host port inside the VM (ssh -R) GUEST:HOST
     Bridge { name: String, spec: String },
-    /// forward/bridge を解除する
+    /// Tear down a forward/bridge
     Unforward { name: String, port: String },
-    /// VMを停止する
+    /// Stop a VM
     Stop { name: String },
-    /// VMを削除する（DB・イメージごと消える）
+    /// Delete a VM (its databases and images go with it)
     Rm { name: String },
-    /// プロビジョニング済みゴールデンVM（cloneで高速起動）
+    /// Pre-provisioned golden VM (build|rm|status); wtx up clones it for fast startup
     Image {
         #[arg(default_value = "status")]
         action: String,
     },
-    /// pull-throughレジストリキャッシュ
+    /// Pull-through registry cache (up|down|status|install|uninstall|serve)
     Mirror {
         #[arg(default_value = "status")]
         action: String,

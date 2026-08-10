@@ -26,19 +26,21 @@ VMを**プロジェクト（ホスト側リポジトリ）ごとにまとめて*
 
 ```
  wtx   mirror[launchd]  ●docker.io  ●ghcr.io  ●quay.io  ●registry.k8s.io
-    NAME                STATUS    GIT     BRANCH
+    NAME                STATUS    GIT       BRANCH
 ┌ VMs ──────────────────────────────────────────────────────────────────┐
 │▶▾ hono-test  ~/dev/hono-test  [2/2 running]                           │
-│   books-api           Running   隔離    books-api                     │
-│   hono-dev            Running   隔離    main                          │
-│ ▾ myapp  ~/repos/myapp  [1/3 running]                                 │
-│   myapp-feature-a     Running   隔離    feature-a                     │
-│   myapp-feature-b     Stopped   隔離    feature-b                     │
-│ ▾ (プロジェクトなし)  [0/1 running]                                    │
+│   books-api           Running   isolated  books-api                   │
+│   hono-dev            Running   isolated  main                        │
+│ ▾ myapp  ~/repos/myapp  [1/2 running]                                 │
+│   myapp-feature-a     Running   isolated  feature-a                   │
+│   myapp-feature-b     Stopped   isolated  feature-b                   │
+│ ▾ (no project)  [0/1 running]                                         │
 │   wtx-golden          Stopped   -                                     │
 └───────────────────────────────────────────────────────────────────────┘
-r:更新  s:起動/停止  y:sync  Enter:shell/開閉  Space:開閉  d:削除  q:終了
+r:refresh  s:start/stop  y:sync  Enter:shell/fold  Space:fold  d:delete  q:quit
 ```
+
+CLIの出力・ヘルプ・TUIのラベルはすべて英語（このREADMEとコード中のコメントは日本語）。
 
 グループ化のキーは `wtx up` 時に記録したメインリポジトリのパス。worktree を複数切っている
 プロジェクトはまとめて並び、リポジトリに紐づかないVM（ゴールデンVM など）は末尾に集まる。

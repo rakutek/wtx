@@ -104,11 +104,11 @@ BRANCH={branch}
 LOCAL=/var/lib/wtx/git/$NAME
 BASE={base}
 
-# 「VMローカルの .git が被さっているか」はマーカーで判定する。
-# worktree モードでは $GITDIR は Lima の ro マウント地点なので mountpoint 判定では区別できない。
+# A marker file tells us whether the VM-local .git is already bind-mounted on top.
+# In worktree mode $GITDIR is itself a Lima mount point, so `mountpoint` cannot tell them apart.
 if [ -e "$GITDIR/.wtx-local" ]; then exit 0; fi
 if [ ! -d "$GITDIR" ]; then
-  echo "wtx: $GITDIR がVM内に見つかりません（マウント漏れ）" >&2
+  echo "wtx: $GITDIR is missing inside the VM (mount not set up)" >&2
   exit 1
 fi
 
@@ -129,7 +129,7 @@ fi
 [ -e "$GITDIR/.wtx-local" ] || sudo mount --bind "$LOCAL" "$GITDIR"
 git -C "$WT" reset -q
 
-# VM再起動後も同じ状態を再現する（bind mount は永続しないため）
+# Recreate the same state after a VM reboot (bind mounts are not persistent)
 sudo tee /usr/local/sbin/wtx-gitmount >/dev/null <<EOF
 #!/bin/sh
 set -e
@@ -210,7 +210,7 @@ pub fn sync(name: &str, host_repo: &Path, workdir: &str, branch: &str) -> Result
         return Err(anyhow!("git fetch failed"));
     }
     if !branch.is_empty() {
-        println!("取り込み: git -C {workdir} merge --ff-only refs/wtx/{name}/{branch}");
+        println!("to merge: git -C {workdir} merge --ff-only refs/wtx/{name}/{branch}");
     }
     Ok(())
 }
