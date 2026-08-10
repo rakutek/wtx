@@ -1,0 +1,66 @@
+minimumLimaVersion: 2.0.0
+base:
+- template:_images/ubuntu-lts
+
+vmType: vz
+mountType: virtiofs
+cpus: {{.CPUs}}
+memory: {{.Memory}}
+disk: {{.Disk}}
+
+mounts:
+{{- range .Mounts}}
+- location: "{{.Location}}"
+{{- if .MountPoint}}
+  mountPoint: "{{.MountPoint}}"
+{{- end}}
+  writable: {{.Writable}}
+{{- end}}
+
+containerd:
+  system: false
+  user: false
+
+# 自動ポートフォワード全無効化（複数VMの同一ポート衝突防止）。公開は wtx forward で明示的に。
+portForwards:
+- guestIP: "0.0.0.0"
+  guestPortRange: [1, 65535]
+  proto: any
+  ignore: true
+
+provision:
+- mode: system
+  script: |
+    #!/bin/bash
+    set -eux -o pipefail
+    command -v docker >/dev/null 2>&1 && exit 0
+    mkdir -p /etc/docker
+    cat >/etc/docker/daemon.json <<'DAEMON'
+    {
+      "registry-mirrors": ["http://host.lima.internal:{{.MirrorPort}}"],
+      "insecure-registries": ["host.lima.internal:{{.MirrorPort}}"]
+    }
+    DAEMON
+    export DEBIAN_FRONTEND=noninteractive
+    curl -fsSL https://get.docker.com | sh
+    usermod -aG docker {{`{{.User}}`}}
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+    apt-get install -y nodejs
+    npm install -g @anthropic-ai/claude-code
+    git config --system --add safe.directory '*'
+- mode: user
+  script: |
+    #!/bin/bash
+    set -eux -o pipefail
+    git config --global user.name {{shq .GitName}}
+    git config --global user.email {{shq .GitEmail}}
+
+probes:
+- script: |
+    #!/bin/bash
+    set -eux -o pipefail
+    if ! timeout 120s bash -c "until command -v docker >/dev/null && command -v node >/dev/null; do sleep 3; done"; then
+      echo >&2 "provision incomplete"
+      exit 1
+    fi
+  hint: See /var/log/cloud-init-output.log in the guest
