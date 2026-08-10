@@ -51,6 +51,14 @@ CLIの出力・ヘルプ・TUIのラベルはすべて英語（このREADMEと�
 `Enter` はVM行では TUI を畳んでVM内シェルに入り、抜けると復帰する。`--snapshot` を付けると
 tty なしで1フレームだけ描画して終了する（動作確認用）。
 
+## 検証
+
+`scripts/check-worktree-lifecycle.sh` が、作成 → VM内コミット → 回収 → 削除 → 孤児検出 →
+`prune` までを実VMで通しで検証する（VMを2台作って消すので1〜2分）。
+既に孤児VMがあるときは `prune` が既存VMを巻き込む恐れがあるため中止する。
+
+設計判断ごとの実機検証記録は [VERIFICATION.md](VERIFICATION.md)。
+
 ## 設計
 
 - **microVM隔離**: Lima vz = Apple Virtualization.framework。Docker SandboxesのmicroVMと同じ隔離クラス
