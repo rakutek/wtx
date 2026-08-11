@@ -324,3 +324,54 @@ Shutdown のままの `simctl launch` は SimError 405（`Unable to lookup in cu
 | `wtx ls` に `sim:Shutdown` が付く（sim を使うVMがあるときだけ simctl に問い合わせ） | PASS |
 | `wtx rm` がデバイス・メタ・ソケットまで残さず消す | PASS |
 | 再アタッチ（既存VMへの `wtx up`）で sim_udid・ports が保持される | PASS（メタを毎回書き直す実装だったため、prev からの引き継ぎを追加） |
+
+## フェーズ10: runtime境界・CLI・mirror・provisionの収束（2026-08-11）
+
+フェーズ8の「VM内agentとhost資格情報を既定共有する」設計を撤回した。wtxは引き続き
+セキュリティサンドボックスではなく、host共有のworktreeと`.git`を信頼境界にはしない。
+標準形を「agent・編集・Git・資格情報はhost、Docker・DB・service・container依存testだけVM」へ
+固定し、VM内agentが必要な場合だけ作成時の`--agent-access`で`~/.claude`とssh-agentを共有する。
+境界の詳細は`docs/TRUST-MODEL.md`に分離した。
+
+### 変更
+
+| 項目 | 変更 |
+|---|---|
+| CLI解決 | `exec` / `shell` / `forward` / `bridge` / `unforward` / `stop`もNAME省略時にcwdから解決。`exec`のguest cwdもhost cwdを既定化 |
+| port表記 | `forward`と`bridge`をともに`HOST:GUEST`へ統一し、0・非数値を拒否 |
+| action | `image` / `mirror`をtyped subcommand化し、typoのstatus fallbackを廃止 |
+| stop | VM停止にforward closeとBooted Simulator shutdownを連動。再`up`で記録済みforwardを再arm |
+| credentials | 既定の`~/.claude` mountとssh-agent forwardingを廃止。`--agent-access`だけopt-inし、既存VMへの後付けはerror |
+| provision | Ubuntu 26.04とDocker Engine 29.7.2一式を固定。Node/Claudeのglobal installを削除。git identityは各起動経路でshell quoteして再注入 |
+| golden | provision schema付きreceiptで互換性を判定。missing/stale時にfreshへ黙ってfallbackせず、`--no-clone`を要求 |
+| mirror | blob hit/missをstream化しHEAD/Range対応。SHA-256検証、scope別token、20GiB既定の自動GCと`mirror gc`を追加 |
+| mirror範囲 | Docker Engineが透過利用するdocker.ioだけを既定化。効かない非Hub `certs.d`生成を削除 |
+| testability | provision分岐、volume rename、repo判別、shell quote、port順、Range、scope token、GCをVM不要のtestへ分離 |
+
+### 自動検証
+
+| command / 項目 | 結果 |
+|---|---|
+| `cargo check --all-targets --locked` | PASS |
+| `cargo test --locked` | PASS（31 tests） |
+| `cargo clippy --all-targets --all-features --locked -- -D warnings` | PASS |
+| `bash -n scripts/*.sh` | PASS |
+| `git diff --check` | PASS |
+| unknown `wtx image bulid` / `wtx mirror statsu`のparse | PASS（error） |
+
+### fresh VM実機smoke（`wtx-v09-smoke`、完了後に削除）
+
+| 項目 | 結果 |
+|---|---|
+| `ensure --no-clone --json`でfresh provisionからdockerd readyまで到達 | PASS |
+| Docker Server version | PASS（29.7.2） |
+| 既定VMの`SSH_AUTH_SOCK`なし、`~/.claude` symlinkなし、global Claude CLIなし | PASS |
+| worktree内のNAMEなし`wtx exec -- ...` | PASS |
+| NAMEなし`wtx forward 48080:3000`からguest HTTP serverへ到達 | PASS（HTTP成功） |
+| NAMEなし`wtx stop`後にVM=`Stopped`、forward port接続不能 | PASS |
+| `rm --if-exists --json` | PASS（`action: deleted`、検証VM残骸なし） |
+| 旧`wtx-golden`の互換性判定 | PASS（`missing or stale build receipt`として拒否） |
+
+既存goldenはuser資産なので自動削除・再buildしていない。新mirror binaryを既存launchd登録へ
+上書きする操作と、数GiB blobの実メモリprofileもこのsmokeでは行っていない。後者はstreaming code path、
+Range response、digest形状、GC、scope別tokenの自動testでregressionを検知する。

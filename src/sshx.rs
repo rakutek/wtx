@@ -136,20 +136,42 @@ pub fn shell(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// forward: ホスト A → VM B (ssh -L) / bridge: VM A → ホスト B (ssh -R)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PortSpec {
+    host: u16,
+    guest: u16,
+}
+
+fn parse_port_spec(spec: &str) -> Result<PortSpec> {
+    let (host, guest) = spec
+        .split_once(':')
+        .ok_or_else(|| anyhow!("port spec must be HOST:GUEST"))?;
+    let host = host
+        .parse::<u16>()
+        .map_err(|_| anyhow!("invalid host port in {spec}"))?;
+    let guest = guest
+        .parse::<u16>()
+        .map_err(|_| anyhow!("invalid guest port in {spec}"))?;
+    if host == 0 || guest == 0 {
+        return Err(anyhow!("ports must be between 1 and 65535"));
+    }
+    Ok(PortSpec { host, guest })
+}
+
+/// forward: ホスト HOST → VM GUEST (ssh -L)
+/// bridge: VM GUEST → ホスト HOST (ssh -R)。CLIの並びは常に HOST:GUEST。
 pub fn forward(name: &str, spec: &str, reverse: bool) -> Result<()> {
     forward_impl(name, spec, reverse, false)
 }
 
 fn forward_impl(name: &str, spec: &str, reverse: bool, quiet: bool) -> Result<()> {
-    let (a, b) = spec
-        .split_once(':')
-        .ok_or_else(|| anyhow!("port spec must be A:B"))?;
-    let sock = wtx_home().join(format!("{name}-{a}.sock"));
+    let spec = parse_port_spec(spec)?;
+    let bound_port = if reverse { spec.guest } else { spec.host };
+    let sock = wtx_home().join(format!("{name}-{bound_port}.sock"));
     let (flag, value) = if reverse {
-        ("-R", format!("{a}:127.0.0.1:{b}"))
+        ("-R", format!("{}:127.0.0.1:{}", spec.guest, spec.host))
     } else {
-        ("-L", format!("{a}:localhost:{b}"))
+        ("-L", format!("{}:localhost:{}", spec.host, spec.guest))
     };
     let mut args = ssh_base(name);
     args.extend([
@@ -168,7 +190,10 @@ fn forward_impl(name: &str, spec: &str, reverse: bool, quiet: bool) -> Result<()
     }
     if !quiet {
         let kind = if reverse { "bridge" } else { "forward" };
-        println!("{kind} {spec} active (stop: wtx unforward {name} {a})");
+        println!(
+            "{kind} {}:{} active (stop: wtx unforward --name {name} {bound_port})",
+            spec.host, spec.guest
+        );
     }
     Ok(())
 }
@@ -222,6 +247,12 @@ pub fn drop_forward(name: &str, host_port: u16) {
 }
 
 pub fn unforward(name: &str, port: &str) -> Result<()> {
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| anyhow!("invalid bound port: {port}"))?;
+    if port == 0 {
+        return Err(anyhow!("port must be between 1 and 65535"));
+    }
     let sock = wtx_home().join(format!("{name}-{port}.sock"));
     let _ = Command::new("ssh")
         .args([
@@ -263,5 +294,27 @@ pub fn close_all_forwards(name: &str) {
                 let _ = std::fs::remove_file(&p);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn port_spec_is_always_host_then_guest() {
+        assert_eq!(
+            parse_port_spec("8080:3000").unwrap(),
+            PortSpec {
+                host: 8080,
+                guest: 3000,
+            }
+        );
+    }
+
+    #[test]
+    fn port_spec_rejects_paths_and_zero() {
+        assert!(parse_port_spec("../../x:3000").is_err());
+        assert!(parse_port_spec("0:3000").is_err());
     }
 }

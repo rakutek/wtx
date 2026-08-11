@@ -300,6 +300,17 @@ fn delete_device_with_output(udid: &str, print_progress: bool) {
     }
 }
 
+/// VM停止に連動してデバイスを停止する。デバイス自体とmetadataは残すため、次回も再利用できる。
+pub fn shutdown_device(udid: &str) -> Result<()> {
+    if udid.is_empty() {
+        return Ok(());
+    }
+    if matches!(device_state(udid)?, Some((state, _)) if state == "Booted") {
+        xcrun(&["simctl", "shutdown", udid])?;
+    }
+    Ok(())
+}
+
 pub fn up(name: Option<&str>, device: Option<&str>) -> Result<()> {
     let (name, mut meta) = resolve(name)?;
     ensure_device(&name, &mut meta, device)?;

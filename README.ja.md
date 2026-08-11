@@ -2,10 +2,10 @@
 
 # wtx
 
-**git worktree ごとに、専用の microVM を。**
+**どのworktreeにも、同じlocalhostと別々のruntimeを。**
 
-並列で走るコーディングエージェントが DB、ポート、Docker イメージを取り合わない。
-それでいて、VM 内のコミットはそのままホストのブランチに乗る。
+プロジェクトへwtx専用設定を足さず、各エージェントへいつもの`localhost:5432`と
+DBごとcloneできる専用runtimeを渡す。
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#ライセンス)
 [![Platform: macOS on Apple Silicon](https://img.shields.io/badge/platform-macOS%20on%20Apple%20Silicon-black.svg?logo=apple)](#動作環境)
@@ -21,13 +21,13 @@
 同じリポジトリの3ブランチで3つのコーディングエージェントを走らせると、全員が `localhost:5432` を取り合い、全員が同じデーモンへ `docker compose up` し、あるブランチのマイグレーションが別ブランチの検証中の DB を壊す。
 
 wtx は git worktree ごとに専用の microVM（Lima/vz）と VM 内専用の dockerd を与える。
-各ブランチが自分の DB、自分のポート、自分のイメージストアを持つ。
-一方で git と `~/.claude` と ssh-agent はホストと共有したままにする。
-VM 内のコミットはホストのブランチをそのまま動かし、VM 内から `git push` も `claude` もそのまま使える。
+各ブランチは同じlocalhostのポートを使いながら、別々のDB、volume、イメージストアを持つ。
+エージェント、編集、Git、資格情報はホストに置き、Docker、DB、service、container依存testだけを
+`wtx exec`でVMへ送る。
 Docker Desktop は不要。
 
 ```text
- wtx   mirror[launchd]  ●docker.io  ●ghcr.io  ●quay.io  ●registry.k8s.io
+ wtx   mirror[launchd]  ●docker.io
     NAME                    STATUS        BRANCH          SIM         NOTE
 ┌ VMs ──────────────────────────────────────────────────────────────────────┐
 │▶▾ hono-test  ~/dev/hono-test  [2/2 running]                               │
@@ -47,19 +47,21 @@ Docker Desktop は不要。
 
 - ⚡ **新しい VM が約8秒**：`wtx up` はプロビジョニング済みのゴールデン VM を clone する（3〜4分が約8秒になる）
 - 🌱 **環境ごと引き継ぐ**：`wtx up --from` は既存 VM を clone し、docker volume（DB データ）、pull 済みイメージ、導入済みツールを持ち越す
+- 🏠 **ポート設定を増やさない**：どのworktreeも通常の`localhost:5432`を使える。branch別のoffsetやagent向け追加指示が要らない
 - 🔀 **回収の儀式なし**：ホストの `.git` を読み書きマウントする。VM 内のコミットは直接ホストのブランチに乗るので、VM を消しても作業が失われる経路がない
-- 🤖 **エージェントがそのまま動く**：`~/.claude` はライブ共有、ssh-agent はフォワード。VM 内の Claude Code はホストの資格情報で動き、`git push` も通る
-- 🔌 **オーケストレータ向け契約**：`wtx ensure --json` はversion付きready receipt、`wtx inspect --json` はruntime/owner状態を返し、`wtx exec --tty` は対話agent TUIをSSH越しに接続する
-- 📦 **内蔵レジストリキャッシュ**：pull-through キャッシュを wtx 自身が実装（Docker 不要）。launchd がオンデマンド起動し、常駐プロセスなし
+- 🔌 **オーケストレータ向け契約**：`wtx ensure --json` はversion付きready receipt、`wtx inspect --json` はruntime/owner状態を返す
+- 📦 **内蔵レジストリキャッシュ**：Docker不要のpull-through cache。blobをstream配信し、Rangeと容量上限付き自動GCに対応
 - 📱 **worktree 専用 iOS シミュレータ**：`wtx sim` が worktree ごとの専用デバイスを VM と対にし、UDID とポートを環境変数でエージェントに渡す
 - 🖥️ **TUI コンソール**：全 VM をプロジェクトごとにまとめ、ミラーの稼働状況とともに1画面で操作する
 - ⬆️ **静かな更新確認**：明示実行は `wtx update check`。対話TUIは24時間cacheを使い、通常コマンドでは通信しない
 
 > [!WARNING]
-> **wtx は便利ツールであり、セキュリティサンドボックスではない。**
-> VM で分かれているのは docker、ポート、プロセス空間であって、権限境界ではない。
-> VM 内のプロセスはホストの `.git` や `~/.claude` に書けるし、ssh-agent も使える。
-> 信頼できないコードやエージェントを閉じ込める用途には使わないこと。
+> **wtxが分離するのはruntimeの衝突であり、信頼境界ではない。**
+> worktreeと`.git`はホストの読み書きマウントなので、VM内コードはホストから見えるsourceと
+> Git metadataを変更できる。agentと資格情報はホストに置き、信頼できないコードの封じ込めには使わない。
+> `--agent-access`は、信頼できるVM内agent向けに`~/.claude`とssh-agentを明示共有するoptionである。
+
+境界と資格情報の扱いは[docs/TRUST-MODEL.md](docs/TRUST-MODEL.md)に明記している。
 
 ## 動作環境
 
@@ -88,12 +90,14 @@ wtx mirror install    # 任意: レジストリキャッシュ（launchdオン�
 # ブランチごとにworktreeを切り、worktreeごとに1 VM。それぞれが自分のdockerd、DB、ポートを持つ
 cd ~/repos/myapp
 wtx new feature-a     # git worktree add ../myapp-feature-a とVM作成を一発で（約8秒）
-wtx exec myapp-feature-a -w ~/repos/myapp-feature-a docker compose up -d --wait
+cd ../myapp-feature-a
+wtx exec -- docker compose up -d --wait
+wtx forward 8080:3000 # VMの3000番をホストのlocalhost:8080へ公開
 
 # 2本目のworktreeは1本目のVMから引き継ぐ: DBデータ、イメージ、ツールが乗り移る
+cd ~/repos/myapp
 wtx new feature-b --from myapp-feature-a
 
-wtx shell myapp-feature-a              # 中でclaudeが使える（設定と認証はホストと共有）
 wtx rm myapp-feature-a --with-worktree # VMとlinked worktreeをまとめて片付ける
 wtx ls                # VM一覧（worktree消失の孤児VMも表示。--json で機械可読）
 wtx prune --yes       # 孤児VMを掃除
@@ -104,26 +108,22 @@ wtx                   # 引数なしでTUIコンソール
 
 ```mermaid
 flowchart LR
+    subgraph HOST["macOS host"]
+        AG["coding agent · editor · Git"]
+        WT["worktree files + .git"]
+        MIRROR["bounded registry cache"]
+        AG --> WT
+    end
     subgraph VMA["microVM: feature-a (Lima/vz)"]
-        AC["Claude Code / your agent"]
         AD["dockerd<br/>postgres :5432 · images"]
     end
     subgraph VMB["microVM: feature-b (Lima/vz)"]
-        BC["Claude Code / your agent"]
         BD["dockerd<br/>postgres :5432 · images"]
     end
-    subgraph HOST["macOS host"]
-        GIT[("repo .git<br/>shared, rw")]
-        CLAUDE["~/.claude"]
-        SSH["ssh-agent"]
-        MIRROR["registry cache"]
-    end
-    AC -->|"commit → host branch"| GIT
-    BC --> GIT
-    CLAUDE -.->|mounted| AC
-    CLAUDE -.-> BC
-    SSH -.->|forwarded| AC
-    SSH -.-> BC
+    WT -->|"same absolute path"| VMA
+    WT -->|"same absolute path"| VMB
+    AG -->|"wtx exec"| AD
+    AG -->|"wtx exec"| BD
     AD -->|pull| MIRROR
     BD -->|pull| MIRROR
 ```
@@ -131,11 +131,16 @@ flowchart LR
 - **microVM は Lima + vz**（Apple Virtualization.framework）。worktree ごとに専用 dockerd を持つための器であって、セキュリティ境界としては設計していない
 - **同パスマウント**：virtiofs でホストと同じ絶対パスにマウントする。worktree をホスト側から直接編集する使い方はそのまま維持される
 - **git はホストと共有**：worktree のメイン `.git` を読み書きマウントする。VM 内のコミットはホストのブランチをそのまま動かすので、回収の工程がなく、VM を消しても作業が失われる経路がない。worktree は各自独立した index/HEAD を持つため、複数 VM が同じリポジトリに同時コミットしても衝突しない（2 VM 同時コミットと fsck クリーンを実機検証済み）
-- **`~/.claude` はマウント共有**：資格情報、settings.json、skills がホストとライブで一致し、VM 側でのトークンリフレッシュもホストとずれない。ホスト側パスを virtiofs でマウントし、ゲストの `~/.claude` から symlink を張る。無効化は `--no-claude`
-- **ssh-agent フォワード**：鍵ファイルを VM に置かずに、VM 内から `git push` や `gh` がそのまま使える。ホスト側 agent に鍵が入っていることが前提
-- **ゴールデン VM**：`wtx image build` で一度だけプロビジョニングし、以後の `wtx up` は `limactl clone` するだけ。VM 作成が3〜4分から約8秒になる（`--no-clone` で毎回プロビジョニング）
+- **資格情報は既定でホストに残す**：`~/.claude`はmountせず、ssh-agent forwardingも無効。信頼できるVM内agentで必要な場合だけ作成時に`--agent-access`で両方を明示共有する。このmount policyは作成後に変えず、切り替えにはVMを作り直す
+- **ゴールデン VM**：`wtx image build` で一度だけプロビジョニングし、以後の `wtx up` は `limactl clone` するだけ。goldenが無い・古い場合は黙って別環境を作らずエラーにし、fresh構築は`--no-clone`で明示する
 - **ポート**：Lima の自動フォワードは全無効化。複数 VM が各自の `localhost:5432` を同時に持てる。公開は `wtx forward`（ssh -L）、ホスト常駐サービスへの逆方向は `wtx bridge`（ssh -R）
-- **VM 内ツール**：docker（rootful）、Node 22、Claude Code、git（identity はホスト設定から注入）
+- **固定runtime**：Docker Engineとpluginはversionを固定する。agent固有CLIはglobal installしない。git identityはgoldenに焼かず、fresh/clone/再起動の全経路でホスト設定から安全に再注入する
+
+### リソースコスト
+
+各VMの既定値は**RAM 4GiB、CPU 2、disk 20GiB**。cloneはdiskを引き継ぎ、CPU/RAMも明示しなければ
+clone元を継承する。Compose project分離より意図的に重いので、runtime stateの完全分離や無変更の
+localhostが不要なら、素のworktreeや共有daemonを選ぶ方がよい。
 
 ## 機能
 
@@ -154,15 +159,15 @@ clone 元由来のコンテナは新 VM から除去される。
 ### 内蔵レジストリキャッシュ
 
 pull-through キャッシュを wtx 自身が実装しているので、動かすのに Docker が要らない。
-blob は digest で不変なのでディスクにキャッシュし、manifest は tag が動くので常に上流へ問い合わせる。
-この分担により、キャッシュ不整合は構造的に起きない。
-上流の 401 は `WWW-Authenticate` を解釈してトークンを取得するので、docker.io だけでなく ghcr.io や quay.io も同じ仕組みで配信できる。
+blobはhit/missとも全量bufferせずstreamし、HEAD/Rangeへ対応する。SHA-256を検証できた完全なblobだけを
+保存する。manifestはtagが動くので常に上流へ問い合わせる。Bearer tokenはregistry単位の1個ではなく、
+repository scopeごとに保持する。
 
 `wtx mirror install` は **launchd ソケットアクティベーション**を登録する。
 常駐プロセスはなく、pull が来た瞬間に起動して10分アイドルで終了する。
-対象と待受ポートは `~/.wtx/mirrors.json` で変更できる。
-ミラーが落ちていても上流直行にフォールバックする。
-透過的に効くのは docker.io のみ（Docker 側の制約。[既知の制約](#既知の制約--todo)を参照）。
+既定で起動するのは、Docker Engineが透過利用できるdocker.ioだけ。追加registryは
+`~/.wtx/mirrors.json`で明示したlocalhost pull用に限る。cacheは既定20GiBで、書き込み後に古いblobを
+自動GCする。`wtx mirror gc --max-gib N`で上限を永続変更し、その場で回収できる。
 
 ### worktree 専用 iOS シミュレータ（`wtx sim`）
 
@@ -215,7 +220,11 @@ brew upgrade wtx
 
 **1デーモン上で compose プロジェクトを手で分ける**方法もある。
 worktree ごとに `COMPOSE_PROJECT_NAME` とポートのずらし幅を割り当てればよい。
-しかしそれは共有デーモンの上に載せたブランチごとの帳簿であり、並列エージェントが既定値のまま `docker compose up` を打った瞬間に破られる。
+しかしそれは共有デーモンの上に載せたブランチごとの帳簿であり、並列エージェントが既定値のまま `docker compose up` を打った瞬間に破られる。プロジェクト設定やagent指示を変更できるなら、この軽い方法を優先してよい。
+
+**Dev Container**は開発containerを標準化する方法で、同時に使うworkspaceが1つなら有力である。
+通常はhost側runtime stateを共有するため、複数worktreeが既定コマンドのまま並列実行するには、やはり名前と
+portの規約が必要になる。wtxは編集をhostに残したまま、seed済みDB volumeを含むdockerd全体をcloneする。
 
 **Docker Sandboxes（sbx）** の隔離技術は wtx と同じ（Apple Virtualization.framework の microVM）。
 ただし評価した時点では、`sbx create` に Docker アカウントと Subscription Service Agreement への同意が必要だった。
@@ -232,21 +241,21 @@ wtx は OSS スタック（Lima）でアカウント不要、ホストの `.git`
 | `wtx up NAME DIR --from SRC` | 既存 VM から引き継いで作成（volume、イメージ、ツールが乗り移る） |
 | `wtx ensure [NAME] [DIR] [--json]` | VMを冪等に作成・起動してdockerd readyまで待機。owner来歴も記録可 |
 | `wtx inspect [NAME] [--json]` | VM/worktreeのready、seed、owner、port、Simulator状態を取得 |
-| `wtx exec NAME [-w DIR] [--tty] CMD…` | VM 内でコマンド実行（終了コードは素通し、`--tty`で対話agent CLI対応） |
-| `wtx shell NAME` | VM 内の対話シェル |
+| `wtx exec [--name NAME] [-w DIR] [--tty] -- CMD…` | cwdからVMを解決し、cwdをguest workdirにして実行。旧`NAME CMD…`も受理 |
+| `wtx shell [NAME]` | VM内shell。NAME省略時はcwdから解決 |
 | `wtx ls [--json]` | VM 一覧（worktree 消失の孤児 VM も表示） |
 | `wtx` / `wtx tui` | TUI コンソール（`--snapshot` で tty なし1フレーム描画） |
-| `wtx forward NAME HOST:GUEST` | VM のポートをホストへ公開（ssh -L） |
-| `wtx bridge NAME GUEST:HOST` | ホストのポートを VM 内へ届ける（ssh -R） |
-| `wtx unforward NAME PORT` | forward / bridge の解除 |
-| `wtx stop NAME` | VM を停止 |
+| `wtx forward [--name NAME] HOST:GUEST` | VM のポートをホストへ公開（ssh -L） |
+| `wtx bridge [--name NAME] HOST:GUEST` | hostのHOST番をguestのGUEST番へ届ける（ssh -R）。forwardと同じ順序 |
+| `wtx unforward [--name NAME] PORT` | forward / bridge の解除 |
+| `wtx stop [NAME]` | VMと起動中のworktree Simulatorを停止 |
 | `wtx rm NAME [--if-exists] [--json] [--with-worktree]` | VMを削除。冪等cleanup receipt、またはlinked worktreeの同時削除に対応 |
 | `wtx prune [--yes]` | worktree が消えた VM をまとめて削除 |
 | `wtx image build\|rm\|status` | ゴールデン VM の管理 |
-| `wtx mirror install\|uninstall\|up\|down\|status` | レジストリキャッシュの管理 |
+| `wtx mirror install\|uninstall\|up\|down\|status\|gc` | 容量制限付きレジストリキャッシュの管理 |
 | `wtx which` | カレント worktree の VM 名を表示（他コマンドと組み合わせ可） |
 | `wtx completions SHELL` | シェル補完を出力（bash, zsh, fish など） |
-| `wtx sim create\|status\|wire\|env\|rm` | worktree 専用 iOS シミュレータ |
+| `wtx sim up\|status\|wire\|env\|rm` | worktree 専用 iOS シミュレータ |
 | `wtx update check [--json]` | GitHub Releasesの新しいversionを確認（インストールはしない） |
 
 ## オーケストレータ（Orca 等）との連携方針
@@ -258,7 +267,7 @@ wtx ensure worker-a /abs/worktree \
   --owner orca \
   --json
 wtx inspect worker-a --json
-wtx exec worker-a --tty -w /abs/worktree claude
+wtx exec --name worker-a -w /abs/worktree -- docker compose up -d --wait
 ```
 
 `ensure` は、VMが無ければ作成、停止中なら起動、実行中なら再利用し、dockerd readyまで待つ。
@@ -275,7 +284,7 @@ ComposeはVM内で通常どおり使う。host Dockerへのsilent fallbackは行
 その他の連携点:
 
 - Orca terminal から `wtx ensure` / `wtx exec` / `wtx shell` をそのまま呼べる（`wtx exec` の終了コードは素通し）
-- worker 内からホストの runtime に届かせたいときは `wtx bridge NAME GUEST:HOST`
+- hostの9000番をworker内9001番へ届けるなら`wtx bridge --name NAME 9000:9001`
 - 完了通知をファイルで受けるなら、共有マウント上に `.result/` を書く運用も可
 
 エージェント用スキル（[skills/wtx/SKILL.md](skills/wtx/SKILL.md)）は次で導入できる。
@@ -307,13 +316,12 @@ wtx の全メカニズムは、実 VM に対する検証を経て採用された
 
 ## 既知の制約 / TODO
 
-- **非 Docker Hub レジストリの透過キャッシュは不可（Docker 側の制約）**。Docker Engine 29 の `registry-mirrors` は Hub 専用で、containerd の `/etc/containerd/certs.d/<registry>/hosts.toml` を置いても、システム containerd に切り替えて transfer プラグインへ `config_path` を与えても、ghcr.io の pull はミラーに来ないことをアクセスログで確認済み（`wtx up` は certs.d を書くので、Docker 側が対応すれば自動で効く）。wtx のミラー自体は ghcr/quay でも正常に配信できるので、明示的に `docker pull localhost:5002/<org>/<image>` の形なら現時点でも利用できる
-- ゴールデン VM には mirrors 設定と `ssh.forwardAgent` が焼き込まれる（`wtx up` 時に certs.d は再適用されるが、`daemon.json` の Hub ミラーポートを変えた場合や、旧ゴールデンのままで agent フォワードが効かない場合は `wtx image rm && wtx image build` で作り直す）
+- **非 Docker Hub レジストリの透過キャッシュは不可（Docker 側の制約）**。Docker Engine 29 の `registry-mirrors` は Hub 専用で、containerd のcerts.dを置いてもghcr.ioのpullはミラーに来ないことを実測済み。そのため既定ではHubだけを起動し、効かないcerts.dも書かない。追加設定したendpointは`docker pull localhost:5002/<org>/<image>`の明示形で利用できる
+- 資格情報共有をopt-inへ変更する前のVMには、旧`~/.claude` mountとagent forwardingが残っている可能性がある。mount policyは再アタッチで安全に変更できないのでVMを作り直す
 - `wtx exec` はシェル構文を解釈しない（argv 素通し）。パイプ等は `bash -c '...'` で渡す
 - clone された VM（ゴールデン / `--from`）のディスクサイズは clone 元のまま（`--disk` は新規プロビジョニング時のみ有効）。`--memory` / `--cpus` は省略すると clone 元の値を引き継ぐ
 - `--from` の volume 付け替えは `<ディレクトリ名>_` 接頭辞の一致で判定する。`COMPOSE_PROJECT_NAME` 環境変数など wtx から見えない方法でプロジェクト名を変えている場合は付け替わらない（`docker volume` を手で rename する）
-- VM 内からの `git push` はホストの ssh-agent に鍵が入っているときだけ通る（macOS は `ssh-add --apple-use-keychain` などで agent に鍵を載せておく）
-- ミラーのキャッシュ削除（GC）は未実装。`~/.wtx/mirror-cache` を手動で消す
+- `--agent-access`を明示したVM内からの`git push`は、ホストのssh-agentに鍵が入っているときだけ通る
 
 ## ドキュメントの言語
 

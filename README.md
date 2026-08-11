@@ -2,10 +2,10 @@
 
 # wtx
 
-**One microVM per git worktree.**
+**The same localhost, a different runtime, for every worktree.**
 
-Run parallel coding agents that never fight over databases, ports, or Docker images —
-while every commit they make lands directly on your host branch.
+Give parallel coding agents an unchanged `localhost:5432` and a cloneable DB/runtime per
+worktree, without adding wtx-specific configuration to the project.
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Platform: macOS on Apple Silicon](https://img.shields.io/badge/platform-macOS%20on%20Apple%20Silicon-black.svg?logo=apple)](#requirements)
@@ -23,12 +23,12 @@ bind `localhost:5432`, all run `docker compose up` against the same daemon, and 
 migration wrecks the database another branch was testing against.
 
 `wtx` gives each git worktree its own microVM (Lima/vz) with a dedicated in-VM dockerd.
-Each branch gets its own databases, its own ports, its own image store. Meanwhile git,
-`~/.claude`, and your ssh-agent stay shared with the host: a commit made inside a VM moves
-the host branch itself, and `git push` and `claude` just work. No Docker Desktop.
+Each branch gets the same familiar localhost ports, but a different database, volume, and
+image store. Agents, editing, Git, and credentials stay on the host; only Docker, databases,
+services, and container-dependent tests go through `wtx exec`. No Docker Desktop.
 
 ```text
- wtx   mirror[launchd]  ●docker.io  ●ghcr.io  ●quay.io  ●registry.k8s.io
+ wtx   mirror[launchd]  ●docker.io
     NAME                    STATUS        BRANCH          SIM         NOTE
 ┌ VMs ──────────────────────────────────────────────────────────────────────┐
 │▶▾ hono-test  ~/dev/hono-test  [2/2 running]                               │
@@ -50,15 +50,14 @@ the host branch itself, and `git push` and `claude` just work. No Docker Desktop
   provisioning from scratch (3–4 minutes → ~8 seconds)
 - 🌱 **Seed one environment from another** — `wtx up --from` clones an existing VM, carrying
   over docker volumes (your DB data), pulled images, and installed tools
+- 🏠 **No project-specific port scheme** — every worktree can keep using its normal
+  `localhost:5432`; agents do not need branch-specific port offsets or prompts
 - 🔀 **No sync ritual** — the host `.git` is mounted read-write. Commits inside the VM land
   on the host branch directly, so deleting a VM cannot lose committed work
-- 🤖 **Agent-ready out of the box** — `~/.claude` is live-shared and the ssh-agent is
-  forwarded: Claude Code runs inside the VM with host credentials, and `git push` works
 - 🔌 **Orchestrator-ready contract** — `wtx ensure --json` returns a versioned readiness
-  receipt, `wtx inspect --json` reports runtime/owner state, and `wtx exec --tty` carries
-  interactive agent TUIs over SSH
+  receipt, and `wtx inspect --json` reports runtime/owner state
 - 📦 **Built-in registry cache** — a pull-through cache implemented in wtx itself
-  (no Docker required), activated on demand by launchd, with no resident process
+  (no Docker required), streamed with Range support and bounded by automatic GC
 - 📱 **Per-worktree iOS simulators** — `wtx sim` pairs a dedicated simulator device with
   each worktree's VM and hands agents its UDID and ports as env vars
 - 🖥️ **A TUI console** — one screen for every VM, grouped by project, plus mirror health
@@ -66,10 +65,13 @@ the host branch itself, and `git push` and `claude` just work. No Docker Desktop
   24-hour cache and never turns ordinary commands into network calls
 
 > [!WARNING]
-> **wtx is a convenience tool, not a security sandbox.** The VM separates docker, ports,
-> and process space — not privileges. Processes inside the VM can write to the host's
-> `.git` and `~/.claude`, and can use your ssh-agent. Do not use wtx to contain untrusted
-> code or agents.
+> **wtx isolates runtime collisions, not trust.** The worktree and `.git` are writable host
+> mounts, so code in the VM can change host-visible source and Git metadata. Keep agents and
+> credentials on the host, and never use wtx to contain untrusted code. `--agent-access`
+> explicitly shares `~/.claude` and the ssh-agent for trusted, VM-resident agents only.
+
+The exact boundary and credential behavior are documented in
+[docs/TRUST-MODEL.md](docs/TRUST-MODEL.md).
 
 ## Requirements
 
@@ -97,12 +99,14 @@ wtx mirror install    # optional: registry cache (launchd on-demand, no daemon)
 # a worktree per branch, a VM per worktree — each with its own dockerd, DBs, and ports
 cd ~/repos/myapp
 wtx new feature-a     # git worktree add ../myapp-feature-a + its VM, in one step (~8 s)
-wtx exec myapp-feature-a -w ~/repos/myapp-feature-a docker compose up -d --wait
+cd ../myapp-feature-a
+wtx exec -- docker compose up -d --wait
+wtx forward 8080:3000 # publish VM port 3000 at host localhost:8080
 
 # a second worktree, seeded from the first: DB data, images, and tools carry over
+cd ~/repos/myapp
 wtx new feature-b --from myapp-feature-a
 
-wtx shell myapp-feature-a              # claude works inside — config and auth are shared with the host
 wtx rm myapp-feature-a --with-worktree # tear down the VM and its linked worktree together
 wtx ls                # lists VMs, flags orphans whose worktree is gone (--json for scripts)
 wtx prune --yes       # clean up orphaned VMs
@@ -113,26 +117,22 @@ wtx                   # no args: the TUI console
 
 ```mermaid
 flowchart LR
+    subgraph HOST["macOS host"]
+        AG["coding agent · editor · Git"]
+        WT["worktree files + .git"]
+        MIRROR["bounded registry cache"]
+        AG --> WT
+    end
     subgraph VMA["microVM: feature-a (Lima/vz)"]
-        AC["Claude Code / your agent"]
         AD["dockerd<br/>postgres :5432 · images"]
     end
     subgraph VMB["microVM: feature-b (Lima/vz)"]
-        BC["Claude Code / your agent"]
         BD["dockerd<br/>postgres :5432 · images"]
     end
-    subgraph HOST["macOS host"]
-        GIT[("repo .git<br/>shared, rw")]
-        CLAUDE["~/.claude"]
-        SSH["ssh-agent"]
-        MIRROR["registry cache"]
-    end
-    AC -->|"commit → host branch"| GIT
-    BC --> GIT
-    CLAUDE -.->|mounted| AC
-    CLAUDE -.-> BC
-    SSH -.->|forwarded| AC
-    SSH -.-> BC
+    WT -->|"same absolute path"| VMA
+    WT -->|"same absolute path"| VMB
+    AG -->|"wtx exec"| AD
+    AG -->|"wtx exec"| BD
     AD -->|pull| MIRROR
     BD -->|pull| MIRROR
 ```
@@ -146,21 +146,28 @@ flowchart LR
   step, and no path by which deleting a VM loses committed work. Worktrees keep independent
   index/HEAD, so multiple VMs can commit to the same repository concurrently
   (verified on real VMs: two simultaneous commits, `git fsck` clean).
-- **`~/.claude` is shared by mount** — credentials, `settings.json`, and skills stay
-  live-identical to the host, and token refreshes inside the VM never drift from the host.
-  The host path is mounted via virtiofs and symlinked from the guest's `~/.claude`.
-  Disable with `--no-claude`.
-- **ssh-agent forwarding** — `git push` and `gh` work inside the VM without copying any
-  key files in. Requires the key to be loaded in the host agent.
+- **Credentials stay on the host by default** — `~/.claude` is not mounted and ssh-agent
+  forwarding is disabled. `--agent-access` opts into both at creation for trusted VM-resident
+  agents. This mount policy is immutable, so changing it requires recreating the VM; it does not
+  turn wtx into a security sandbox.
 - **Golden VM** — `wtx image build` provisions once; after that `wtx up` is just a
-  `limactl clone`, taking VM creation from 3–4 minutes to ~8 seconds
-  (`--no-clone` provisions from scratch every time).
+  `limactl clone`, taking VM creation from 3–4 minutes to ~8 seconds. The default command
+  refuses a missing/stale golden image instead of silently creating a different environment;
+  `--no-clone` is the explicit fresh-provisioning escape hatch.
 - **Ports** — Lima's automatic port forwarding is disabled entirely, so several VMs can
   each hold their own `localhost:5432` at the same time. Publish a VM port to the host
   with `wtx forward` (ssh -L); reach a host-resident service from inside the VM with
   `wtx bridge` (ssh -R).
-- **In-VM toolchain** — rootful docker, Node 22, Claude Code, and git with your identity
-  injected from the host config.
+- **Pinned in-VM runtime** — rootful Docker Engine and its plugins are version-pinned.
+  Agent-specific CLIs are not globally installed. Git identity is safely re-applied from the
+  host after every fresh start or clone, rather than being frozen into the golden image.
+
+### Resource cost
+
+Each VM is configured with **4 GiB RAM, 2 CPUs, and a 20 GiB disk by default**. Clones keep
+the source disk and inherit CPU/RAM unless overridden. This is intentionally heavier than
+Compose project names: use plain worktrees or one shared daemon when branch-specific runtime
+state and unchanged localhost assumptions are not worth that cost.
 
 ## Features
 
@@ -179,17 +186,18 @@ the volumes are used as-is. Containers inherited from the source are removed fro
 
 ### Built-in registry cache
 
-A pull-through cache implemented in wtx itself — no Docker needed to run it. Blobs are
-immutable by digest, so they are cached on disk; manifests move with tags, so they are
-always fetched upstream. That split rules out cache-staleness by construction. Upstream
-`401` responses are handled by interpreting `WWW-Authenticate` and fetching a token, so
-ghcr.io, quay.io, and friends are served through the same mechanism as docker.io.
+A pull-through cache implemented in wtx itself — no Docker needed to run it. Blob hits and
+misses stream without loading whole layers into memory; HEAD and Range requests are honored,
+and a blob is cached only after its SHA-256 digest verifies. Manifests move with tags, so they
+are always fetched upstream. Bearer tokens are cached by registry/repository scope rather
+than in one global slot.
 
 `wtx mirror install` registers **launchd socket activation**: no resident process — the
-cache starts the moment a pull arrives and exits after 10 idle minutes. Targets and ports
-live in `~/.wtx/mirrors.json`. If the mirror is down, pulls fall back to going upstream
-directly. Transparent mirroring currently applies to docker.io only — a Docker-side
-limitation, see [Known limitations](#known-limitations--todo).
+cache starts the moment a pull arrives and exits after 10 idle minutes. The default setup
+starts only the Docker Hub endpoint because Docker Engine only applies `registry-mirrors`
+there. Extra registries can be added to `~/.wtx/mirrors.json` for explicit localhost pulls.
+The cache is capped at 20 GiB by default and evicts oldest blobs after writes; run
+`wtx mirror gc --max-gib N` to change the persistent limit and collect immediately.
 
 ### Per-worktree iOS simulators (`wtx sim`)
 
@@ -249,7 +257,13 @@ agents collide on.
 **Hand-managed compose projects on one daemon** can work: assign each worktree a
 `COMPOSE_PROJECT_NAME` and a port offset. But that is per-branch bookkeeping layered on a
 single shared daemon — the kind of convention a parallel agent breaks the first time it
-runs `docker compose up` with defaults.
+runs `docker compose up` with defaults. Prefer that lighter option when changing project
+configuration and agent instructions is acceptable.
+
+**Dev Containers** standardize a development container and are often the better choice for
+one active workspace. They normally share the host's Docker daemon/runtime state and still
+need per-worktree naming and port policy for parallel default commands. wtx instead clones an
+entire dockerd state, including seeded database volumes, while leaving editing on the host.
 
 **Docker Sandboxes (sbx)** builds on the same isolation technology (Apple
 Virtualization.framework microVMs). When we evaluated it, `sbx create` required Docker
@@ -268,21 +282,21 @@ there is no collection step. The evaluation notes are in
 | `wtx up NAME DIR --from SRC` | Seed from an existing VM: volumes, images, tools carry over |
 | `wtx ensure [NAME] [DIR] [--json]` | Idempotently create/start a VM and wait for dockerd; optionally record owner provenance |
 | `wtx inspect [NAME] [--json]` | Report VM/worktree readiness, seed, owner, ports, and simulator state |
-| `wtx exec NAME [-w DIR] [--tty] CMD…` | Run a command in the VM; exit code passes through; `--tty` supports interactive agent CLIs |
-| `wtx shell NAME` | Interactive shell inside the VM |
+| `wtx exec [--name NAME] [-w DIR] [--tty] -- CMD…` | Run in the cwd-resolved VM; cwd is also the default guest directory. Legacy `NAME CMD…` remains accepted |
+| `wtx shell [NAME]` | Interactive shell; NAME resolves from cwd when omitted |
 | `wtx ls [--json]` | List VMs; flags orphans whose worktree is gone |
 | `wtx` / `wtx tui` | TUI console (`--snapshot` for a single ttyless frame) |
-| `wtx forward NAME HOST:GUEST` | Publish a VM port on the host (ssh -L) |
-| `wtx bridge NAME GUEST:HOST` | Expose a host port inside the VM (ssh -R) |
-| `wtx unforward NAME PORT` | Tear down a forward/bridge |
-| `wtx stop NAME` | Stop a VM |
+| `wtx forward [--name NAME] HOST:GUEST` | Publish a VM port on the host (ssh -L) |
+| `wtx bridge [--name NAME] HOST:GUEST` | Expose host HOST at guest GUEST (ssh -R); same argument order as `forward` |
+| `wtx unforward [--name NAME] PORT` | Tear down a forward/bridge |
+| `wtx stop [NAME]` | Stop a VM and its booted worktree Simulator |
 | `wtx rm NAME [--if-exists] [--json] [--with-worktree]` | Delete a VM with an idempotent cleanup receipt or optional linked-worktree removal |
 | `wtx prune [--yes]` | Delete VMs whose worktree no longer exists |
 | `wtx image build\|rm\|status` | Manage the golden VM |
-| `wtx mirror install\|uninstall\|up\|down\|status` | Manage the registry cache |
+| `wtx mirror install\|uninstall\|up\|down\|status\|gc` | Manage the bounded registry cache |
 | `wtx which` | Print the VM name for the current worktree (composable) |
 | `wtx completions SHELL` | Print shell completions (bash, zsh, fish, elvish, powershell) |
-| `wtx sim create\|status\|wire\|env\|rm` | Per-worktree iOS simulator |
+| `wtx sim up\|status\|wire\|env\|rm` | Per-worktree iOS simulator |
 | `wtx update check [--json]` | Check GitHub Releases for a newer version without installing it |
 
 ## Working with orchestrators and agents
@@ -295,7 +309,7 @@ wtx ensure worker-a /abs/worktree \
   --owner orca \
   --json
 wtx inspect worker-a --json
-wtx exec worker-a --tty -w /abs/worktree claude
+wtx exec --name worker-a -w /abs/worktree -- docker compose up -d --wait
 ```
 
 `ensure` is idempotent: it creates a missing VM, starts a stopped VM, or reuses a running
@@ -315,7 +329,7 @@ Additional integration points:
 
 - Call `wtx ensure` / `wtx exec` / `wtx shell` from any terminal-driving orchestrator
   (Orca, for example) — `wtx exec` passes exit codes through untouched
-- Reach a host-resident runtime from inside a worker VM with `wtx bridge NAME GUEST:HOST`
+- Reach host port 9000 at guest port 9001 with `wtx bridge --name NAME 9000:9001`
 - For file-based completion signals, write a `.result/` directory on the shared mount
 
 An agent skill ([skills/wtx/SKILL.md](skills/wtx/SKILL.md)) installs with:
@@ -368,13 +382,13 @@ End-to-end check scripts re-verify the core flows:
   Docker Engine 29's `registry-mirrors` applies to Hub alone. Placing containerd
   `/etc/containerd/certs.d/<registry>/hosts.toml` — or switching to the system containerd
   and giving the transfer plugin a `config_path` — still does not route ghcr.io pulls
-  through the mirror, as confirmed in the mirror's access logs. `wtx up` writes certs.d
-  anyway, so the cache takes effect automatically if Docker starts honoring it. The mirror
-  itself serves ghcr/quay correctly, so explicit pulls of the form
-  `docker pull localhost:5002/<org>/<image>` work today.
-- **The golden VM bakes in the mirror config and `ssh.forwardAgent`.** `wtx up` re-applies
-  certs.d, but if you change the Hub mirror port in `daemon.json`, or agent forwarding does
-  not work in an older golden image, rebuild with `wtx image rm && wtx image build`.
+  through the mirror, as confirmed in the mirror's access logs. wtx therefore configures
+  only Docker Hub by default and does not write ineffective certs.d entries. Explicitly
+  configured endpoints still support pulls of the form
+  `docker pull localhost:5002/<org>/<image>`.
+- VMs created before credential sharing became opt-in may still contain the old `~/.claude`
+  mount and agent-forwarding setting. Recreate them; mount policy cannot be safely changed
+  on reattachment.
 - `wtx exec` does not interpret shell syntax (argv passes through verbatim). Wrap pipes
   and friends in `bash -c '...'`.
 - Cloned VMs (golden or `--from`) keep the clone source's disk size — `--disk` applies to
@@ -382,9 +396,8 @@ End-to-end check scripts re-verify the core flows:
 - `--from` volume re-prefixing matches on the `<directory-name>_` prefix. If the project
   name is set in a way wtx cannot see (such as a `COMPOSE_PROJECT_NAME` environment
   variable), volumes are not re-prefixed — rename them manually with `docker volume`.
-- `git push` from inside a VM works only while the host ssh-agent holds your key
-  (on macOS, load it with `ssh-add --apple-use-keychain` or similar).
-- Mirror cache GC is not implemented — delete `~/.wtx/mirror-cache` manually.
+- With explicit `--agent-access`, `git push` from inside a VM works only while the host
+  ssh-agent holds your key (on macOS, load it with `ssh-add --apple-use-keychain` or similar).
 
 ## Documentation languages
 

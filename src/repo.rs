@@ -61,3 +61,51 @@ pub fn inspect_repo(workdir: &Path) -> Result<Option<RepoInfo>> {
         host_git,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inspects_normal_repository() {
+        let root = tempfile::tempdir().unwrap();
+        let git = root.path().join(".git");
+        std::fs::create_dir(&git).unwrap();
+        std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        let info = inspect_repo(root.path()).unwrap().unwrap();
+        assert_eq!(info.kind, RepoKind::Normal);
+        assert_eq!(info.host_repo, root.path());
+        assert_eq!(info.host_git, git);
+        assert_eq!(info.branch, "main");
+    }
+
+    #[test]
+    fn inspects_linked_worktree_with_absolute_gitdir() {
+        let root = tempfile::tempdir().unwrap();
+        let main = root.path().join("main");
+        let worktree = root.path().join("feature");
+        let gitdir = main.join(".git/worktrees/feature");
+        std::fs::create_dir_all(&gitdir).unwrap();
+        std::fs::create_dir(&worktree).unwrap();
+        std::fs::write(gitdir.join("HEAD"), "ref: refs/heads/feature\n").unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", gitdir.display()),
+        )
+        .unwrap();
+
+        let info = inspect_repo(&worktree).unwrap().unwrap();
+        assert_eq!(info.kind, RepoKind::Worktree);
+        assert_eq!(info.host_repo, main);
+        assert_eq!(info.host_git, main.join(".git"));
+        assert_eq!(info.branch, "feature");
+    }
+
+    #[test]
+    fn rejects_unrecognized_git_pointer() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(".git"), "not a gitdir\n").unwrap();
+        assert!(inspect_repo(root.path()).is_err());
+    }
+}

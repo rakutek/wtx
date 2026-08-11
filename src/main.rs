@@ -44,8 +44,11 @@ struct UpFlags {
     /// images and installed tools carry over (the source is stopped briefly)
     #[arg(long, conflicts_with = "no_clone")]
     from: Option<String>,
-    /// Do not mount the host ~/.claude into the VM
+    /// Explicitly share ~/.claude and the host ssh-agent with the VM (trusted agents only)
     #[arg(long)]
+    agent_access: bool,
+    /// Deprecated compatibility flag; credentials are no longer shared by default
+    #[arg(long, hide = true, conflicts_with = "agent_access")]
     no_claude: bool,
     /// Provision from scratch instead of cloning the golden VM
     #[arg(long)]
@@ -65,7 +68,7 @@ impl UpFlags {
             cpus: self.cpus,
             disk: self.disk,
             from: self.from,
-            no_claude: self.no_claude,
+            agent_access: self.agent_access && !self.no_claude,
             no_clone: self.no_clone,
             extra_mounts,
             sim: self.sim,
@@ -172,7 +175,9 @@ enum Cmd {
     },
     /// Run a command inside a VM (exit code is passed through; use bash -c '...' for shell syntax)
     Exec {
-        name: String,
+        /// VM name. Omit inside a worktree covered by a wtx VM
+        #[arg(short = 'n', long)]
+        name: Option<String>,
         #[arg(short = 'w', long)]
         workdir: Option<String>,
         /// Allocate a remote PTY for interactive agent CLIs
@@ -182,7 +187,7 @@ enum Cmd {
         cmd: Vec<String>,
     },
     /// Open an interactive shell inside a VM
-    Shell { name: String },
+    Shell { name: Option<String> },
     /// List VMs
     Ls {
         /// Machine-readable output for scripts and agents
@@ -195,14 +200,35 @@ enum Cmd {
         #[arg(long)]
         snapshot: bool,
     },
-    /// Publish a VM port on the host (ssh -L) HOST:GUEST
-    Forward { name: String, spec: String },
-    /// Expose a host port inside the VM (ssh -R) GUEST:HOST
-    Bridge { name: String, spec: String },
+    /// Publish a VM port on the host (ssh -L). SPEC is HOST:GUEST
+    Forward {
+        /// VM name. Omit inside a worktree covered by a wtx VM
+        #[arg(short = 'n', long)]
+        name: Option<String>,
+        /// HOST:GUEST, or legacy NAME HOST:GUEST
+        #[arg(required = true, num_args = 1..=2)]
+        args: Vec<String>,
+    },
+    /// Expose a host port inside the VM (ssh -R). SPEC is also HOST:GUEST
+    Bridge {
+        /// VM name. Omit inside a worktree covered by a wtx VM
+        #[arg(short = 'n', long)]
+        name: Option<String>,
+        /// HOST:GUEST, or legacy NAME HOST:GUEST
+        #[arg(required = true, num_args = 1..=2)]
+        args: Vec<String>,
+    },
     /// Tear down a forward/bridge
-    Unforward { name: String, port: String },
+    Unforward {
+        /// VM name. Omit inside a worktree covered by a wtx VM
+        #[arg(short = 'n', long)]
+        name: Option<String>,
+        /// Bound port, or legacy NAME PORT
+        #[arg(required = true, num_args = 1..=2)]
+        args: Vec<String>,
+    },
     /// Stop a VM
-    Stop { name: String },
+    Stop { name: Option<String> },
     /// Delete a VM (its databases and images go with it; commits are already on the host)
     Rm {
         name: String,
@@ -222,17 +248,17 @@ enum Cmd {
         #[arg(long)]
         yes: bool,
     },
-    /// Pre-provisioned golden VM (build|rm|status); wtx up clones it for fast startup
+    /// Manage the pre-provisioned golden VM
     Image {
-        #[arg(default_value = "status")]
-        action: String,
+        #[command(subcommand)]
+        action: Option<ImageCmd>,
     },
-    /// Pull-through registry cache (up|down|status|install|uninstall|serve)
+    /// Manage the pull-through registry cache
     Mirror {
-        #[arg(default_value = "status")]
-        action: String,
+        #[command(subcommand)]
+        action: Option<MirrorCmd>,
     },
-    /// Print the VM name for the current worktree (composable: wtx exec "$(wtx which)" ...)
+    /// Print the VM name for the current worktree
     Which,
     /// Print shell completions (bash|zsh|fish|elvish|powershell)
     Completions { shell: clap_complete::Shell },
@@ -284,6 +310,39 @@ enum UpdateCmd {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum ImageCmd {
+    /// Build the golden VM
+    Build,
+    /// Delete the golden VM
+    Rm,
+    /// Show golden VM status
+    Status,
+}
+
+#[derive(Subcommand)]
+enum MirrorCmd {
+    /// Start the mirror in the background
+    Up,
+    /// Stop a manually started mirror
+    Down,
+    /// Show mirror and cache status
+    Status,
+    /// Install launchd socket activation
+    Install,
+    /// Remove launchd socket activation
+    Uninstall,
+    /// Run cache GC now; optionally persist a new size limit
+    Gc {
+        /// Cache limit in GiB
+        #[arg(long)]
+        max_gib: Option<u64>,
+    },
+    /// Serve registry requests (internal launchd entrypoint)
+    #[command(hide = true)]
+    Serve,
 }
 
 fn main() {
@@ -343,9 +402,16 @@ fn run() -> Result<()> {
             name,
             workdir,
             tty,
-            cmd,
-        }) => sshx::exec(&name, workdir.as_deref(), &cmd, tty),
-        Some(Cmd::Shell { name }) => sshx::shell(&name),
+            mut cmd,
+        }) => {
+            let (name, meta) = exec_target(name.as_deref(), &mut cmd)?;
+            let workdir = default_guest_workdir(workdir, &meta);
+            sshx::exec(&name, Some(&workdir), &cmd, tty)
+        }
+        Some(Cmd::Shell { name }) => {
+            let (name, _) = sim::resolve(name.as_deref())?;
+            sshx::shell(&name)
+        }
         Some(Cmd::Ls { json }) => {
             if json {
                 lima::ls_json()
@@ -354,10 +420,22 @@ fn run() -> Result<()> {
                 Ok(())
             }
         }
-        Some(Cmd::Forward { name, spec }) => sshx::forward(&name, &spec, false),
-        Some(Cmd::Bridge { name, spec }) => sshx::forward(&name, &spec, true),
-        Some(Cmd::Unforward { name, port }) => sshx::unforward(&name, &port),
-        Some(Cmd::Stop { name }) => util::limactl(&["stop", &name]),
+        Some(Cmd::Forward { name, args }) => {
+            let (name, spec) = named_value(name.as_deref(), &args)?;
+            sshx::forward(&name, &spec, false)
+        }
+        Some(Cmd::Bridge { name, args }) => {
+            let (name, spec) = named_value(name.as_deref(), &args)?;
+            sshx::forward(&name, &spec, true)
+        }
+        Some(Cmd::Unforward { name, args }) => {
+            let (name, port) = named_value(name.as_deref(), &args)?;
+            sshx::unforward(&name, &port)
+        }
+        Some(Cmd::Stop { name }) => {
+            let (name, _) = sim::resolve(name.as_deref())?;
+            lima::stop(&name, false).map_err(anyhow::Error::msg)
+        }
         Some(Cmd::Rm {
             name,
             with_worktree,
@@ -372,10 +450,10 @@ fn run() -> Result<()> {
             },
         ),
         Some(Cmd::Prune { yes }) => lima::prune(yes),
-        Some(Cmd::Image { action }) => match action.as_str() {
-            "build" => lima::image_build(),
-            "rm" => lima::image_rm(),
-            _ => {
+        Some(Cmd::Image { action }) => match action.unwrap_or(ImageCmd::Status) {
+            ImageCmd::Build => lima::image_build(),
+            ImageCmd::Rm => lima::image_rm(),
+            ImageCmd::Status => {
                 lima::image_status();
                 Ok(())
             }
@@ -397,13 +475,14 @@ fn run() -> Result<()> {
                 SimCmd::Rm { name } => sim::rm(name.as_deref()),
             }
         }
-        Some(Cmd::Mirror { action }) => match action.as_str() {
-            "serve" => mirror::serve(),
-            "up" => mirror::up(),
-            "down" => mirror::down(),
-            "install" => launchd::install(),
-            "uninstall" => launchd::uninstall(),
-            _ => {
+        Some(Cmd::Mirror { action }) => match action.unwrap_or(MirrorCmd::Status) {
+            MirrorCmd::Serve => mirror::serve(),
+            MirrorCmd::Up => mirror::up(),
+            MirrorCmd::Down => mirror::down(),
+            MirrorCmd::Install => launchd::install(),
+            MirrorCmd::Uninstall => launchd::uninstall(),
+            MirrorCmd::Gc { max_gib } => mirror::gc(max_gib),
+            MirrorCmd::Status => {
                 mirror::status();
                 Ok(())
             }
@@ -411,6 +490,57 @@ fn run() -> Result<()> {
         Some(Cmd::Update { action }) => match action {
             UpdateCmd::Check { json } => update::check_and_print(json),
         },
+    }
+}
+
+/// `exec` はcwd解決を優先する。旧 `wtx exec NAME CMD...` 形式は、先頭が実在する
+/// wtx VM名のときだけ互換経路として認識する。曖昧な場合は `--name` で明示できる。
+fn exec_target(
+    explicit: Option<&str>,
+    cmd: &mut Vec<String>,
+) -> Result<(String, lima::InstanceMeta)> {
+    if let Some(name) = explicit {
+        return sim::resolve(Some(name));
+    }
+    if cmd.len() >= 2 && lima::load_meta(&cmd[0]).is_some() {
+        let name = cmd.remove(0);
+        return sim::resolve(Some(&name));
+    }
+    sim::resolve(None)
+}
+
+fn default_guest_workdir(requested: Option<String>, meta: &lima::InstanceMeta) -> String {
+    if let Some(path) = requested {
+        return path;
+    }
+    std::env::current_dir()
+        .ok()
+        .and_then(|p| std::fs::canonicalize(p).ok())
+        .filter(|p| {
+            let wd = Path::new(&meta.workdir);
+            *p == wd || p.starts_with(wd)
+        })
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| meta.workdir.clone())
+}
+
+/// NAME省略時はcwdから解決し、2引数なら旧 `NAME VALUE` 形式として扱う。
+fn named_value(explicit: Option<&str>, args: &[String]) -> Result<(String, String)> {
+    match (explicit, args) {
+        (Some(name), [value]) => {
+            let (name, _) = sim::resolve(Some(name))?;
+            Ok((name, value.clone()))
+        }
+        (None, [value]) => {
+            let (name, _) = sim::resolve(None)?;
+            Ok((name, value.clone()))
+        }
+        (None, [name, value]) => {
+            let (name, _) = sim::resolve(Some(name))?;
+            Ok((name, value.clone()))
+        }
+        (Some(_), _) => Err(anyhow!("pass one value when --name is used")),
+        _ => Err(anyhow!("expected VALUE or legacy NAME VALUE")),
     }
 }
 
@@ -470,14 +600,46 @@ mod tests {
 
     #[test]
     fn exec_tty_is_parsed_without_becoming_remote_argv() {
-        let cli = Cli::try_parse_from(["wtx", "exec", "--tty", "vm-a", "codex"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["wtx", "exec", "--tty", "--name", "vm-a", "--", "codex"]).unwrap();
         match cli.cmd.unwrap() {
             Cmd::Exec { name, tty, cmd, .. } => {
-                assert_eq!(name, "vm-a");
+                assert_eq!(name.as_deref(), Some("vm-a"));
                 assert!(tty);
                 assert_eq!(cmd, ["codex"]);
             }
             _ => panic!("expected exec"),
+        }
+    }
+
+    #[test]
+    fn exec_accepts_cwd_resolved_command_without_name() {
+        let cli =
+            Cli::try_parse_from(["wtx", "exec", "--", "docker", "compose", "up", "-d"]).unwrap();
+        match cli.cmd.unwrap() {
+            Cmd::Exec { name, cmd, .. } => {
+                assert!(name.is_none());
+                assert_eq!(cmd, ["docker", "compose", "up", "-d"]);
+            }
+            _ => panic!("expected exec"),
+        }
+    }
+
+    #[test]
+    fn image_and_mirror_reject_unknown_actions() {
+        assert!(Cli::try_parse_from(["wtx", "image", "bulid"]).is_err());
+        assert!(Cli::try_parse_from(["wtx", "mirror", "statsu"]).is_err());
+    }
+
+    #[test]
+    fn bridge_uses_one_cwd_resolved_host_guest_value() {
+        let cli = Cli::try_parse_from(["wtx", "bridge", "5432:5432"]).unwrap();
+        match cli.cmd.unwrap() {
+            Cmd::Bridge { name, args } => {
+                assert!(name.is_none());
+                assert_eq!(args, ["5432:5432"]);
+            }
+            _ => panic!("expected bridge"),
         }
     }
 

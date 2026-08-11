@@ -8,8 +8,8 @@ description: >-
   environment seeding, golden VMs, registry mirrors,
   release update checks,
   "worktreeごとにVM/DB", "VM内でdocker", or worktree-specific simulators.
-  Git, ~/.claude, and ssh-agent are shared with the host, so VM commits land
-  directly on the host branch. wtx is not a security sandbox. Use orca-cli for
+  The worktree and Git metadata are host-shared, but credentials stay on the
+  host unless --agent-access is explicitly requested. wtx is not a security sandbox. Use orca-cli for
   Orca-owned worktrees and terminals; use plain git worktrees when no isolated
   VM or Docker runtime is needed.
 ---
@@ -20,15 +20,15 @@ git worktree × コーディングエージェントの並列開発のための 
 独立したVM（Lima vz microVM）＋VM内専用 dockerd を与えるので、各ブランチが自分の
 DB・ポート・イメージを持ち、複数エージェントを同時に走らせても衝突しない。
 ホストと同じ絶対パスで worktree をマウントするので、ホスト側での直接編集はそのまま使える。
-VM内には docker（rootful）+ Node 22 + Claude Code + git が入っている。
+VM内にはversion固定のdocker（rootful）とgitが入る。agent固有CLIはglobal installしない。
 
-git・`~/.claude`・ssh-agent は**ホストと共有**される。VM内のコミットは即ホストのブランチに
-乗り、`git push` / `gh` / `claude` はVM内でそのまま使える。wtx は便利ツールであって
-**セキュリティサンドボックスではない**（信頼できないコードの封じ込めには使わない）。
+worktreeとgit metadataはホストと共有され、VM内コミットは即ホストのブランチに乗る。
+`~/.claude`とssh-agentは既定で共有せず、信頼できるVM内agentで必要な場合だけ
+`--agent-access`を指定する。wtxは**セキュリティサンドボックスではない**。
+agent・編集・Git・資格情報はhost、Docker/DB/serviceだけVMへ送るのが標準形。
 
 コマンドやフラグを暗記や推測で書かないこと。実行前に `wtx --help` /
-`wtx <cmd> --help` で確認する。例外は `wtx image` と `wtx mirror` の
-ACTION 引数で、これらは `--help` に列挙されないため本ファイルに明記してある。
+`wtx <cmd> --help` で確認する。`image`と`mirror`も型付きsubcommandとしてhelpに列挙される。
 
 ## セットアップ（初回のみ）
 
@@ -39,8 +39,8 @@ wtx mirror install             # 任意: レジストリキャッシュ（launch
 wtx image build                # ゴールデンVM構築（3〜4分）
 ```
 
-ゴールデンVMがあると以後の `wtx up` は `limactl clone` で約8秒。無いと毎回
-3〜4分のフルプロビジョニングに落ちる。
+ゴールデンVMがあると以後の `wtx up` は `limactl clone` で約8秒。無い・古い場合は
+別環境へ黙ってfallbackせず失敗する。fresh構築が必要なら`--no-clone`を明示する。
 
 ## 基本フロー
 
@@ -51,9 +51,9 @@ wtx up                                 # worktree内で引数なし: そのworkt
 wtx up NAME ~/repos/worktree-dir       # 明示形（worktree自動判別、gitはホストと共有）
 wtx ensure NAME ~/repos/worktree-dir --json # 冪等に作成/起動し、dockerd ready receiptを返す
 wtx inspect NAME --json                # runtime・worktree・owner・port・sim状態
-wtx exec NAME -w ~/repos/worktree-dir docker compose up -d --wait
-wtx exec NAME --tty -w ~/repos/worktree-dir claude # 対話agent CLIをPTY接続
-wtx shell NAME                         # 対話シェル（中で claude も使える）
+wtx exec -- docker compose up -d --wait # worktree内ではNAME/-w不要
+wtx exec --name NAME -- docker compose up -d --wait # 明示形
+wtx shell                              # worktree内ではNAME省略
 wtx rm NAME [--if-exists --json]       # 対応版ではオーケストレータ向け冪等cleanup
 wtx rm NAME [--with-worktree]          # 単独利用向け削除（コミットはホストに残る）
 wtx ls --json                          # 一覧（機械可読。worktreeが消えたVMは orphaned 扱い）
@@ -63,13 +63,13 @@ wtx update check --json                # 新しい安定版を明示確認（更
 ```
 
 - VM内でコミットすると**そのままホストのブランチが進む**。回収の手順（旧 `wtx sync`）は
-  存在しない。push もVM内からそのまま実行できる（ホストの ssh-agent に鍵がある場合）。
+  存在しない。VM内pushは`--agent-access`で作成し、host ssh-agentに鍵がある場合だけ使える。
 - TUI はVMを**プロジェクト（`wtx up` 時に記録したメインリポジトリ）ごとにまとめて**表示する。
   見出し行で `Space`/`Enter` を押すと開閉し、`[稼働数/総数]` の要約だけになる。
   VM行では `s` 起動/停止、`d` 削除、`Enter` でシェル。
 - `wtx exec` は **argv 素通し**でシェル構文を解釈しない。パイプ・glob・リダイレクトは
-  `wtx exec NAME bash -c '...'` の形で渡す。終了コードは素通しされる。
-- 対話agent CLIは `wtx exec NAME --tty [-w DIR] CMD...` で起動する。`--tty` はSSHのPTYを
+  `wtx exec -- bash -c '...'` の形で渡す。終了コードは素通しされる。
+- 対話CLIは `wtx exec [--name NAME] --tty -- CMD...` で起動する。`--tty` はSSHのPTYを
   強制割り当てし、window resize・signal・終了コードをSSH経由で中継する。
 - オーケストレータからは `wtx ensure ... --json` を使う。VMが無ければ作成、停止中なら起動、
   実行中なら再利用し、dockerd readyまで待って `schema_version: 1` のreceiptを返す。
@@ -79,9 +79,10 @@ wtx update check --json                # 新しい安定版を明示確認（更
   一致するか検証する。違うseedへ変更したい場合は新しいVMを作る。
 - `wtx up` の主なフラグ: `--from`（既存VMから環境を引き継ぐ）、`--memory/--cpus`
   （省略時は新規 4GiB/2、clone は元の値を引き継ぐ）、`--disk`（新規プロビジョニング時のみ）、
-  `--no-claude`（`~/.claude` をマウントしない）、
+  `--agent-access`（信頼できるVM内agent向けに`~/.claude`とssh-agentを共有）、
   `--no-clone`（clone せず新規プロビジョニング。`--from` と排他）。
   追加マウントは位置引数で、`:ro` を付けると読み取り専用。
+  credential mount policyは作成時に固定され、切り替える場合はVMを作り直す。
 
 ## 新しいworktreeの初回bootstrap
 
@@ -158,13 +159,10 @@ agent操作ではそれだけに依存しない。VMの寿命はworker terminal�
 Lima の自動フォワードは全無効化されている（複数 VM が各自の `localhost:5432` を持てる）。
 
 ```bash
-wtx forward NAME 8080:3000    # SPEC は HOST:GUEST — VMのポートをホストへ公開 (ssh -L)
-wtx bridge  NAME 9000:9000    # SPEC は GUEST:HOST — ホストのポートをVM内へ露出 (ssh -R)
-wtx unforward NAME 8080       # 解除
+wtx forward 8080:3000    # HOST:GUEST — VMの3000番をhostの8080番へ (ssh -L)
+wtx bridge  9000:9001    # HOST:GUEST — hostの9000番をguestの9001番へ (ssh -R)
+wtx unforward 8080       # cwdのVMから解除。明示時は--name NAME
 ```
-
-**forward と bridge で SPEC の順序が逆**（forward=HOST:GUEST、bridge=GUEST:HOST）。
-間違えやすいので必ず上の対応で書く。
 
 ## worktree専用 iOS シミュレータ（wtx sim）
 
@@ -187,8 +185,8 @@ iOSアプリを含むリポジトリでは、worktreeごとに専用のシミュ
   （`WTX_PORT_<LABEL>` は `wtx sim wire <label>:<VM内ポート>` で払い出したホストポート）
 - 操作: 外部ツールには後述の規約で担当UDIDを明示する。直接操作する場合は
   `xcrun simctl ... "$WTX_SIM_UDID" ...` のように対象を必ず指定する。wtx に操作コマンドは無い
-- VM側（db・api・docker）の作業は `wtx exec "$(wtx which)" ...`（`wtx which` は
-  カレントディレクトリからVM名を解決する。`wtx sim` 系も NAME 省略で同じ解決が効く）
+- VM側（db・api・docker）の作業は `wtx exec -- ...`（NAMEとworkdirは省略時に
+  カレントディレクトリから解決する。`wtx sim` 系も NAME 省略で同じ解決が効く）
 - シミュレータ操作は**ホスト側でだけ**可能。VM内シェル（`wtx shell` の中）に simctl は
   存在しないので、VM内で頼まれたら実行せずその旨を報告する
 
@@ -223,19 +221,18 @@ Argent、agent-browser、Xcode連携、Computer Useなど、wtx外のツール�
 接続できないときはまず `eval "$(wtx sim env)"` を再実行する。状態確認は
 `wtx sim status`（`--json` あり）。
 
-## image / mirror の ACTION（`--help` に出ないので暗記対象）
+## image / mirror
 
 ```bash
 wtx image  [status|build|rm]                        # 省略時 status
-wtx mirror [status|serve|up|down|install|uninstall] # 省略時 status
+wtx mirror [status|serve|up|down|install|uninstall|gc] # 省略時 status
 ```
 
-- ミラーが**透過的に効くのは docker.io のみ**（Docker Engine 側の制約）。
-  ghcr.io / quay.io などは `docker pull localhost:5002/<org>/<image>` の明示形なら使える。
+- 既定endpointは、透過的に効くdocker.ioのみ。cacheは20GiB上限で自動GCされ、
+  `wtx mirror gc --max-gib N`で永続上限を変更できる。
 - ミラーが落ちていても pull は上流直行にフォールバックする（ビルドは止まらない）。
 - `~/.wtx/mirrors.json` を編集したら `wtx mirror install` を再実行する。
-- ゴールデンVMには Hub ミラーポート設定と `ssh.forwardAgent` が焼き込まれる。
-  変えたら `wtx image rm && wtx image build`。
+- ゴールデンVMはprovision schema receiptで互換性を確認する。古ければrebuildする。
 
 ## 更新確認
 
@@ -249,9 +246,8 @@ wtx mirror [status|serve|up|down|install|uninstall] # 省略時 status
 
 - tty なしで TUI の状態を確認するには `wtx tui --snapshot`（1フレーム描画して終了）。
   VM 一覧だけなら `wtx ls`。
-- `wtx up` はホストの `~/.claude` を VM に**マウント**する（資格情報・settings・skills が
-  ホストとライブで一致）。不要なら `--no-claude`。
-- VM内からの `git push` はホストの ssh-agent フォワード経由。鍵が agent に無いと失敗する
+- `wtx up --agent-access`を明示した場合だけ、ホストの`~/.claude`とssh-agentをVMへ共有する。
+- そのVM内からの `git push` はホストの ssh-agent フォワード経由。鍵が agent に無いと失敗する
   （その場合はホスト側で push するか、`ssh-add` で鍵を載せてもらう）。
 - 旧バージョンのwtx（隔離gitモード）で作られたVMでは、VM内コミットがホストに現れない。
   `wtx up` での再アタッチ時に警告が出たら、そのVMは作り直す。

@@ -64,7 +64,9 @@ $WTX exec "$A" bash -c 'nohup python3 -m http.server 8765 >/dev/null 2>&1 & slee
 chk "forward 経由でVM内サーバに届く"     "curl -s -o /dev/null --max-time 5 http://localhost:$PORT_A/"
 
 echo "=== 5. VM再起動をまたぐ env の再arm ==="
+xcrun simctl boot "$UDID_A" >/dev/null 2>&1
 $WTX stop "$A" >/dev/null 2>&1
+chk "wtx stopでSimulatorもShutdown" "xcrun simctl list devices | grep '$UDID_A' | grep -q '(Shutdown)'"
 limactl start "$A" --tty=false >/dev/null 2>&1
 chk "再起動直後は forward が落ちている"  "! curl -s -o /dev/null --max-time 3 http://localhost:$PORT_A/"
 (cd "$BASE/a" && eval "$($WTX sim env 2>/dev/null)") || fail "sim env(再arm)"

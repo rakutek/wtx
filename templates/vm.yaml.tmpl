@@ -1,6 +1,6 @@
 minimumLimaVersion: 2.0.0
 base:
-- template:_images/ubuntu-lts
+- template:_images/ubuntu-26.04
 
 vmType: vz
 mountType: virtiofs
@@ -8,10 +8,9 @@ cpus: __CPUS__
 memory: __MEMORY__
 disk: __DISK__
 
-# ホストの ssh-agent をVMへフォワードする（VM内から git push / gh がそのまま使える）。
-# 鍵ファイル自体はVMに置かない。ホスト側 agent に鍵が入っていることが前提。
+# 資格情報共有は --agent-access を明示したVMだけで有効にする。
 ssh:
-  forwardAgent: true
+  forwardAgent: __FORWARD_AGENT__
 
 mounts:
 __MOUNTS__
@@ -32,7 +31,7 @@ provision:
   script: |
     #!/bin/bash
     set -eux -o pipefail
-    command -v docker >/dev/null 2>&1 && exit 0
+    if docker version 2>/dev/null | grep -Eq 'Version:[[:space:]]+29\.7\.2'; then exit 0; fi
     mkdir -p /etc/docker
     cat >/etc/docker/daemon.json <<'DAEMON'
     {
@@ -41,26 +40,35 @@ provision:
     }
     DAEMON
     export DEBIAN_FRONTEND=noninteractive
-    curl -fsSL https://get.docker.com | sh
+    apt-get update
+    apt-get install -y ca-certificates curl
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+    chmod a+r /etc/apt/keyrings/docker.asc
+    cat >/etc/apt/sources.list.d/docker.sources <<'DOCKER_REPO'
+    Types: deb
+    URIs: https://download.docker.com/linux/ubuntu
+    Suites: resolute
+    Components: stable
+    Architectures: arm64
+    Signed-By: /etc/apt/keyrings/docker.asc
+    DOCKER_REPO
+    apt-get update
+    apt-get install -y \
+      docker-ce='5:29.7.2-1~ubuntu.26.04~resolute' \
+      docker-ce-cli='5:29.7.2-1~ubuntu.26.04~resolute' \
+      containerd.io='2.3.3-1~ubuntu.26.04~resolute' \
+      docker-buildx-plugin='0.36.1-1~ubuntu.26.04~resolute' \
+      docker-compose-plugin='5.4.0-1~ubuntu.26.04~resolute'
+    apt-mark hold docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
     usermod -aG docker {{.User}}
-    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-    apt-get install -y nodejs
-    npm install -g @anthropic-ai/claude-code
     git config --system --add safe.directory '*'
-    # 初回 push が対話プロンプトで止まらないよう、未知ホスト鍵は TOFU で受け入れる
-    printf 'Host *\n  StrictHostKeyChecking accept-new\n' > /etc/ssh/ssh_config.d/90-wtx.conf
-- mode: user
-  script: |
-    #!/bin/bash
-    set -eux -o pipefail
-    git config --global user.name '__GIT_NAME__'
-    git config --global user.email '__GIT_EMAIL__'
 
 probes:
 - script: |
     #!/bin/bash
     set -eux -o pipefail
-    if ! timeout 120s bash -c "until command -v docker >/dev/null && command -v node >/dev/null; do sleep 3; done"; then
+    if ! timeout 120s bash -c "until command -v docker >/dev/null; do sleep 3; done"; then
       echo >&2 "provision incomplete"
       exit 1
     fi

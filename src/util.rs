@@ -125,3 +125,14 @@ pub fn git_config_global(key: &str, fallback: &str) -> String {
         out
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_quote_handles_apostrophes_and_newlines() {
+        assert_eq!(shq("O'Brien"), r#"'O'\''Brien'"#);
+        assert_eq!(shq("first\nsecond"), "'first\nsecond'");
+    }
+}

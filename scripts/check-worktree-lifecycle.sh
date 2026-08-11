@@ -35,20 +35,22 @@ mkdir -p "$REPO" && cd "$REPO" || exit 1
 git init -q -b main && echo base > base.txt && git add -A && git commit -q -m init
 git worktree add -q "$REPO-a" -b feat-a
 git worktree add -q "$REPO-b" -b feat-b
-$WTX up wtxcheck-a "$REPO-a" >/dev/null 2>&1 || fail "wtx up wtxcheck-a"
+$WTX up wtxcheck-a "$REPO-a" --agent-access >/dev/null 2>&1 || fail "wtx up wtxcheck-a --agent-access"
 $WTX up wtxcheck-b "$REPO-b" >/dev/null 2>&1 || fail "wtx up wtxcheck-b"
 chk "VM 2台が起動" "[ \$(limactl list wtxcheck-a wtxcheck-b --format '{{.Status}}' | grep -c Running) -eq 2 ]"
 chk "この時点では孤児ではない" "! $WTX ls | grep -q orphaned"
 
-echo "=== 2b. ~/.claude 共有と ssh-agent フォワード ==="
+echo "=== 2b. 資格情報共有は既定OFF、明示opt-in ==="
+chk "既定VMでは ~/.claude を共有しない" "$WTX exec wtxcheck-b -- bash -c 'test ! -L ~/.claude'"
+chk "既定VMでは ssh-agent に到達しない" "$WTX exec wtxcheck-b -- bash -c 'ssh-add -l >/dev/null 2>&1; test \$? -eq 2'"
 if [ -d "$HOME/.claude" ]; then
-  chk "VM内 ~/.claude がホストへの symlink" "$WTX exec wtxcheck-a bash -c 'test -L ~/.claude && test -d ~/.claude/'"
+  chk "--agent-access VMでは ~/.claude を共有" "$WTX exec wtxcheck-a -- bash -c 'test -L ~/.claude && test -d ~/.claude/'"
 else
   echo "SKIP  ホストに ~/.claude が無いため確認省略"
 fi
 if [ -n "${SSH_AUTH_SOCK:-}" ]; then
   # ssh-add -l は 鍵あり=0 / 鍵なし=1 / agent不達=2。フォワード自体の確認なので 2 以外なら成功
-  chk "ssh-agent がVMへフォワードされる" "$WTX exec wtxcheck-a bash -c 'ssh-add -l >/dev/null 2>&1; [ \$? -ne 2 ]'"
+  chk "--agent-access VMでは ssh-agent が届く" "$WTX exec wtxcheck-a -- bash -c 'ssh-add -l >/dev/null 2>&1; [ \$? -ne 2 ]'"
 else
   echo "SKIP  ホストに SSH_AUTH_SOCK が無いため確認省略"
 fi
@@ -58,6 +60,7 @@ $WTX tui --snapshot > /tmp/wtxcheck-tui1.txt 2>&1
 chk "TUI にプロジェクト見出しと [2/2 running]" "grep -q 'wtxcheck' /tmp/wtxcheck-tui1.txt && grep -q '2/2 running' /tmp/wtxcheck-tui1.txt"
 
 echo "=== 4. VM内コミットがホストに直接反映される（共有git） ==="
+chk "cwd解決execはNAME/-w不要" "cd '$REPO-a' && test \"\$($WTX exec -- pwd)\" = '$REPO-a'"
 $WTX exec wtxcheck-a -w "$REPO-a" bash -c 'echo a > a.txt && git add a.txt && git commit -qm "work in VM A"' >/dev/null 2>&1
 chk "ホストの feat-a にコミットが見える"   "git -C '$REPO' log --oneline feat-a | grep -q 'work in VM A'"
 chk "ホスト側 worktree はクリーン"          "[ -z \"\$(git -C '$REPO-a' status --porcelain)\" ]"

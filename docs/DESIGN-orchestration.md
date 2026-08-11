@@ -59,14 +59,16 @@ wtx ensure NAME WORKDIR \
 `wtx inspect [NAME] --json`は同じ`instance` schemaを返す。NAME省略時はカレントディレクトリを
 覆うVMを解決する。JSONはstdout、warning/errorはstderrへ出し、stdoutへ進捗を混ぜない。
 
-## 対話agent
+## VM commandとTTY
 
 ```bash
-wtx exec NAME --tty -w WORKDIR claude
+wtx exec --name NAME -w WORKDIR -- docker compose up -d --wait
+wtx exec --name NAME --tty -- <interactive-command>
 ```
 
 `--tty`はSSHへ`-tt`を渡す。SSHがPTY、window resize、signalを中継し、wtxはremote processの
-終了コードをそのまま返す。非対話コマンドは従来どおり`--tty`なしで実行する。
+終了コードをそのまま返す。標準形ではagent自体をhostで動かす。信頼できるagentをVM内で動かす
+例外経路では、VM作成時に`--agent-access`を明示しない限り資格情報を共有しない。
 
 ## agent開始のbarrier
 

@@ -1,5 +1,5 @@
 class Wtx < Formula
-  desc "One Lima microVM with a dedicated dockerd per git worktree"
+  desc "Per-worktree microVMs with isolated Docker runtimes for parallel coding agents"
   homepage "https://github.com/rakutek/wtx"
   url "https://github.com/rakutek/wtx/releases/download/v__VERSION__/wtx-__VERSION__-aarch64-apple-darwin.tar.gz"
   sha256 "__SHA256__"

@@ -27,7 +27,7 @@ worktreeのソースはホストと同じ絶対パスで両側から見えるた
 
 ### デバイスの割り当て
 
-`wtx up NAME DIR --sim [DEVICE_TYPE]` で、デフォルトのdevice setに `wtx-NAME` という名前のデバイスを作る。
+`wtx up NAME DIR --sim [--sim-device DEVICE_TYPE]` で、デフォルトのdevice setに `wtx-NAME` という名前のデバイスを作る。
 `--sim` はオプトインとする。iOSを扱わない利用者にデバイス作成の副作用を負わせないためである。
 
 - UDIDとdevice typeは `~/.wtx/NAME.json` に記録する（`sim_udid`、`sim_devicetype`）
@@ -88,9 +88,10 @@ DerivedDataをworktree内（例: `.wtx-derived/`）に置けば、worktree間で
 
 ```bash
 wtx up mono-feat-a ~/repos/mono-feat-a --sim "iPhone 16 Pro"
-wtx exec mono-feat-a -w ~/repos/mono-feat-a docker compose up -d --wait
-wtx sim wire mono-feat-a api:3000
-eval "$(wtx sim env mono-feat-a)"
+cd ~/repos/mono-feat-a
+wtx exec -- docker compose up -d --wait
+wtx sim wire api:3000
+eval "$(wtx sim env)"
 
 xcodebuild -workspace App.xcworkspace -scheme App \
   -destination "id=$WTX_SIM_UDID" -derivedDataPath .wtx-derived build
@@ -186,4 +187,5 @@ NAMEはすべて省略可能で、省略時はカレントディレクトリのw
 設計案の `--sim [DEVICE_TYPE]`（値が省略可能なフラグ）は、後続の位置引数（追加マウント）を
 値として飲み込む誤解析があるため、`--sim` ＋ `--sim-device TYPE` の2フラグに分けた。
 `sim wire` のNAMEが後置なのも同じ理由（省略可能な位置引数は必須引数に先行できない）。
-`wtx rm` / `wtx prune` / `wtx ls` は対応済み。TUIへのsim表示は未対応（今後の課題）。
+`wtx stop` / TUIのstopは起動中デバイスをshutdownし、`wtx up`は記録済みforwardを再armする。
+`wtx rm` / `wtx prune` / `wtx ls` / TUIのsim表示も対応済み。

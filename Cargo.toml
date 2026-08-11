@@ -1,9 +1,9 @@
 [package]
 name = "wtx"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 authors = ["Raku Sakaguchi <rakutek12@gmail.com>"]
-description = "worktree×コーディングエージェント並列開発ツール: worktreeごとの独立VM (Lima/vz) + VM内dockerd、--fromでDB・イメージごと環境を引き継ぐ"
+description = "Per-worktree microVMs with isolated Docker runtimes for parallel coding agents"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/rakutek/wtx"
 
@@ -19,11 +19,16 @@ axum = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls"] }
 futures-util = "0.3"
 tokio-util = { version = "0.7", features = ["io"] }
+async-stream = "0.3"
+sha2 = "0.10"
 ratatui = "0.29"
 unicode-width = "0.2"
 crossterm = "0.28"
 dirs = "6"
 libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
 
 [profile.release]
 strip = true

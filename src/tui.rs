@@ -254,7 +254,7 @@ impl App {
         std::thread::spawn(move || {
             let result = match verb {
                 "start" => crate::util::limactl_capture(&["start", &name, "--tty=false"]),
-                "stop" => crate::util::limactl_capture(&["stop", &name]),
+                "stop" => lima::stop(&name, true),
                 _ => lima::rm(&name, lima::RemoveOpts::default()).map_err(|e| e.to_string()),
             };
             let _ = tx.send(Msg::OpDone { name, verb, result });
