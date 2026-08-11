@@ -438,7 +438,7 @@ pub fn rm(name: &str, with_worktree: bool) -> Result<()> {
             crate::sim::delete_device(&m.sim_udid);
         }
     }
-    limactl(&["delete", "-f", name])?;
+    limactl_capture(&["delete", "-f", name]).map_err(|e| anyhow!("limactl delete: {e}"))?;
     let _ = std::fs::remove_file(wtx_home().join(format!("{name}.yaml")));
     let _ = std::fs::remove_file(meta_path(name));
 

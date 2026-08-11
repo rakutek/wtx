@@ -31,6 +31,22 @@ pub fn limactl(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// 出力を継承せずに実行する limactl。TUIのバックグラウンド操作から呼んでも
+/// 画面を汚さない。失敗時は stderr の最後の非空行をエラーとして返す。
+pub fn limactl_capture(args: &[&str]) -> std::result::Result<(), String> {
+    let out = Command::new("limactl").args(args).output().map_err(|e| e.to_string())?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    Err(err
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("limactl failed")
+        .to_string())
+}
+
 pub fn limactl_out(args: &[&str]) -> String {
     Command::new("limactl")
         .args(args)
