@@ -20,7 +20,7 @@ jobs:
     name: arm64 binary and Homebrew tap
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Rust toolchain
         run: rustup show active-toolchain
@@ -101,7 +101,7 @@ jobs:
           fi
 
       - name: Check out Homebrew tap
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ env.TAP_REPOSITORY }}
           ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}

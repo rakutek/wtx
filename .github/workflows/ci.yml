@@ -19,7 +19,7 @@ jobs:
     name: fmt / clippy / build / unit test
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Rust toolchain
         run: rustup show active-toolchain
