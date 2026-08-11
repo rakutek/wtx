@@ -8,7 +8,7 @@ cpus: __CPUS__
 memory: __MEMORY__
 disk: __DISK__
 
-# 資格情報共有は --agent-access を明示したVMだけで有効にする。
+# Enable credential sharing only for VMs explicitly created with `--agent-access`.
 ssh:
   forwardAgent: __FORWARD_AGENT__
 
@@ -19,7 +19,8 @@ containerd:
   system: false
   user: false
 
-# 自動ポートフォワード全無効化（複数VMの同一ポート衝突防止）。公開は wtx forward で明示的に。
+# Disable automatic port forwarding to prevent collisions between identical ports in multiple
+# VMs. Publish ports explicitly with `wtx forward`.
 portForwards:
 - guestIP: "0.0.0.0"
   guestPortRange: [1, 65535]

@@ -1,10 +1,12 @@
-//! 内蔵 pull-through レジストリキャッシュ。
+//! Built-in pull-through registry cache.
 //!
-//! distribution のような汎用レジストリではなく、必要な部分だけを実装する:
-//!   - blob は digest で不変なのでディスクにキャッシュする（イメージ容量のほぼ全て）
-//!   - manifest は tag が動くので常に上流へ問い合わせる（キャッシュ不整合を構造的に排除）
-//!   - 上流の 401 は WWW-Authenticate を解釈してトークンを取得し、透過的に再試行する
-//!     → docker.io だけでなく ghcr.io / quay.io などでも同じ仕組みで動く
+//! This implements only the required subset rather than a general-purpose registry such as
+//! distribution:
+//!   - Blobs are immutable by digest and cached on disk; they account for most image data.
+//!   - Manifests are always fetched upstream because tags can move, preventing stale caches.
+//!   - Upstream 401 responses are handled by parsing WWW-Authenticate, acquiring a token,
+//!     and retrying transparently. The same mechanism works for docker.io, ghcr.io, quay.io,
+//!     and other compatible registries.
 use crate::util::wtx_home;
 use anyhow::{anyhow, Result};
 use axum::body::{Body, Bytes};
@@ -30,10 +32,11 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 const DEFAULT_CACHE_MAX_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 
 fn now() -> i64 {
-    SystemTime::now()
+    let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs() as i64
+        .as_secs();
+    i64::try_from(seconds).unwrap_or(i64::MAX)
 }
 
 #[derive(Debug, Clone)]
@@ -55,7 +58,7 @@ fn upstream_for(registry: &str) -> String {
     }
 }
 
-/// ~/.wtx/mirrors.json（{"ghcr.io": 5002, ...}）を読む。無ければ既定値。
+/// Read `~/.wtx/mirrors.json` (`{"ghcr.io": 5002, ...}`), or use defaults if absent.
 pub fn mirror_config() -> Vec<MirrorEntry> {
     let map = std::fs::read_to_string(wtx_home().join("mirrors.json"))
         .ok()
@@ -80,8 +83,7 @@ pub fn mirror_port() -> u16 {
     mirror_config()
         .iter()
         .find(|e| e.registry == "docker.io")
-        .map(|e| e.port)
-        .unwrap_or(5001)
+        .map_or(5001, |e| e.port)
 }
 
 pub fn port_alive(port: u16) -> bool {
@@ -125,7 +127,7 @@ struct TokenResp {
     access_token: String,
 }
 
-/// WWW-Authenticate: Bearer realm="...",service="...",scope="..." を解釈してトークンを取る。
+/// Parse `WWW-Authenticate: Bearer realm="...",service="...",scope="..."` and obtain a token.
 fn parse_challenge(challenge: &str) -> Option<AuthChallenge> {
     let rest = challenge.trim().strip_prefix("Bearer ")?;
     let mut params: BTreeMap<&str, String> = BTreeMap::new();
@@ -172,7 +174,7 @@ async fn fetch_token(st: &AppState, challenge: &AuthChallenge) -> Option<String>
     }
 }
 
-/// 上流へのリクエスト。401 ならトークンを取り直して一度だけ再試行する。
+/// Send an upstream request, refreshing the token and retrying once after a 401.
 async fn upstream_get(
     st: &AppState,
     path: &str,
@@ -217,7 +219,8 @@ async fn upstream_get(
         else {
             return Ok(resp);
         };
-        // 既存tokenで401なら必ずrefreshする。未認証ならscope別cacheを再利用できる。
+        // Always refresh an existing token after a 401. An unauthenticated request can
+        // reuse the per-scope cache.
         auth = if auth.is_none() {
             st.tokens.lock().await.by_challenge.get(&challenge).cloned()
         } else {
@@ -327,10 +330,9 @@ async fn serve_cached_blob(path: &Path, headers: &HeaderMap, head: bool) -> io::
         },
         None => None,
     };
-    let (status, start, length) = match range {
-        Some(r) => (StatusCode::PARTIAL_CONTENT, r.start, r.end - r.start + 1),
-        None => (StatusCode::OK, 0, len),
-    };
+    let (status, start, length) = range.map_or((StatusCode::OK, 0, len), |r| {
+        (StatusCode::PARTIAL_CONTENT, r.start, r.end - r.start + 1)
+    });
     if start != 0 {
         file.seek(std::io::SeekFrom::Start(start)).await?;
     }
@@ -437,9 +439,8 @@ async fn handle_blob(
     method: Method,
 ) -> Response {
     LAST_ACTIVITY.store(now(), Ordering::Relaxed);
-    let path = match blob_path(&st.cache, &digest) {
-        Some(p) => p,
-        None => return (StatusCode::BAD_REQUEST, "bad digest").into_response(),
+    let Some(path) = blob_path(&st.cache, &digest) else {
+        return (StatusCode::BAD_REQUEST, "bad digest").into_response();
     };
     if tokio::fs::metadata(&path).await.is_ok() {
         return match serve_cached_blob(&path, &headers, method == Method::HEAD).await {
@@ -468,7 +469,7 @@ async fn handle_blob(
             .unwrap();
     }
     let out = response_with_upstream_headers(status, resp.headers());
-    // Range responseは部分blobなのでcacheしない。上流bodyはそのままstreamする。
+    // Do not cache a partial blob from a range response; stream the upstream body directly.
     if range.is_some() || status == StatusCode::PARTIAL_CONTENT {
         let stream = resp
             .bytes_stream()
@@ -531,7 +532,7 @@ async fn handle_blob(
     out.body(Body::from_stream(stream)).unwrap()
 }
 
-/// manifest は tag が動くので常に上流に問い合わせる（キャッシュしない）。
+/// Always fetch manifests upstream because tags can move; do not cache them.
 async fn handle_manifest(
     State(st): State<AppState>,
     AxPath((name, reference)): AxPath<(String, String)>,
@@ -583,7 +584,7 @@ fn router(entry: MirrorEntry) -> Router {
         .with_state(state)
 }
 
-/// /v2/<name...>/{manifests,blobs}/<ref> を name に / を含む形で振り分ける。
+/// Route `/v2/<name...>/{manifests,blobs}/<ref>` while allowing `/` within name.
 async fn dispatch(
     State(st): State<AppState>,
     AxPath(rest): AxPath<String>,
@@ -637,7 +638,7 @@ pub fn serve() -> Result<()> {
         let _ = std::fs::write(&pid_file, std::process::id().to_string());
 
         if activated {
-            // launchd 起動時はアイドルで終了する（次のアクセスで launchd が再起動する）
+            // Exit when idle under launchd; launchd restarts the process on the next request.
             loop {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 if now() - LAST_ACTIVITY.load(Ordering::Relaxed) > 600 {
@@ -690,7 +691,7 @@ pub fn down() -> Result<()> {
 
 pub fn status() {
     let mode = if crate::launchd::installed() {
-        "launchd on-demand (starts on access, exits after 10 min idle)"
+        "launchd on-demand (starts on access, exits when idle)"
     } else {
         "manual (wtx mirror up)"
     };
@@ -708,8 +709,9 @@ pub fn status() {
 }
 
 fn human_bytes(bytes: u64) -> String {
-    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
-    format!("{:.2} GiB", bytes as f64 / GIB)
+    const GIB: u128 = 1024 * 1024 * 1024;
+    let hundredths = (u128::from(bytes) * 100 + GIB / 2) / GIB;
+    format!("{}.{:02} GiB", hundredths / 100, hundredths % 100)
 }
 
 pub fn gc(max_gib: Option<u64>) -> Result<()> {
@@ -733,8 +735,9 @@ pub fn gc(max_gib: Option<u64>) -> Result<()> {
     Ok(())
 }
 
-/// Docker Engineが実際に透過利用するHub mirrorだけをdaemon.jsonへ収束させる。
-/// 非Hub entryは明示的な localhost pull用で、効かないcerts.d設定は生成しない。
+/// Reconcile only the Hub mirror that Docker Engine can use transparently into `daemon.json`.
+/// Non-Hub entries are for explicit localhost pulls, so do not generate ineffective
+/// `certs.d` configuration for them.
 pub fn apply_to_vm(vm: &str) -> Result<()> {
     let port = mirror_port();
     let script = format!(
@@ -818,6 +821,14 @@ mod tests {
         assert!(blob_path(Path::new("/cache"), &digest).is_some());
         assert!(blob_path(Path::new("/cache"), "sha256:../../etc/passwd").is_none());
         assert!(blob_path(Path::new("/cache"), &format!("sha512:{}", "a".repeat(64))).is_none());
+    }
+
+    #[test]
+    fn byte_sizes_are_formatted_without_floating_point_loss() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        assert_eq!(human_bytes(0), "0.00 GiB");
+        assert_eq!(human_bytes(GIB / 2), "0.50 GiB");
+        assert_eq!(human_bytes(GIB), "1.00 GiB");
     }
 
     #[test]

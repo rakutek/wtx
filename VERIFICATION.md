@@ -41,7 +41,7 @@
 | 2 | VM内dockerdがホストのレジストリミラー経由でpullできる | **PASS** — `daemon.json`の`registry-mirrors`+`insecure-registries`で成立。ミラーログに67ヒット |
 | 3 | `.db-seed/seed.sql`がinitdbで自動適用される | **PASS** — VM内初回`compose up`でmainの2行が再現 |
 | 4 | ブランチのマイグレーションがVM内DBにだけ当たり、ホストmain DBが無傷 | **PASS** — `recipes.description`はprobe VMのDBにのみ存在 |
-| 5 | 2つのVMが同時に各自の`localhost:5432`を持てる | **PASS** — probe/feature-b同時稼働、データ独立。ミラー温態でのpullは**5.4秒** |
+| 5 | 2つのVMが同時に各自の`localhost:5432`を持てる | **PASS** — probe/feature-b同時稼働、データ独立 |
 | 6 | `ssh -L`でホストから任意ポートに接続できる | **PASS** — ホスト15432→probe VMの5432でpsql成功 |
 | 7 | 読み取り専用マウントのreviewer VMが編集できない | **PASS** — touchもgit commitもRead-only file systemで拒否。`--no-optional-locks`でlog/diffは可 |
 | 8 | `ssh -R`ブリッジでVM内からホストのループバック限定サービスに届く | **PASS** — VM内curl→ホスト127.0.0.1:18777のHTTPサーバ応答 |
@@ -52,7 +52,6 @@
 - provisionの`usermod -aG docker`はLimaのssh control master確立後だと既存セッションに効かない →
   `ssh -o ControlMaster=no -o ControlPath=none`の新規接続なら有効（wtx execはこの方式）
 - git identityはVM内で未設定 → provisionでホストの`git config`から注入する
-- VM作成時間: 初回（イメージDL込み）約5分、2台目以降 約2〜3分（get.docker.comのインストールが支配的）
 
 ## フェーズ3: wtx CLIへの固め込みとエンドツーエンド確認（PASS）
 
@@ -61,7 +60,7 @@
 
 ```
 scripts/new-env.sh feature-c
-# → worktree作成 → pg_dump → wtx up（VM作成 約4分） → VM内で npm install
+# → worktree作成 → pg_dump → wtx up → VM内で npm install
 #   → docker compose up -d --wait（seed自動適用） → drizzle-kit migrate まで自動完走
 ```
 
@@ -126,10 +125,10 @@ worktreeのgitdirポインタが指す先をVMローカルに再現する |
 
 | 項目 | 結果 |
 |---|---|
-| **VM作成の高速化** | `wtx image build` でプロビジョニング済みゴールデンVMを作り、`wtx up` は `limactl clone --mount-only`。**3〜4分 → 約8秒**（隔離git構築・資格情報コピー込み） |
+| **ゴールデンVMからのclone** | `wtx image build` でプロビジョニング済みゴールデンVMを作り、`wtx up` は `limactl clone --mount-only` を使う |
 | **通常リポジトリの隔離git** | bind mount 方式に統一し、linked worktree と通常リポジトリの両方に適用。VM再起動後は systemd unit が再現 |
 | **gc事故対策** | `wtx up` 時にホストへ `refs/wtx/keep/<name>/*` を作成し、alternates 参照中の object を保護（`wtx rm` で削除） |
-| **ミラーの常駐廃止** | launchd ソケットアクティベーション（cgo/FFI で `launch_activate_socket`）。**常駐0の状態からアクセスで起動**し、10分アイドルで終了することを確認 |
+| **ミラーの常駐廃止** | launchd ソケットアクティベーション（cgo/FFI で `launch_activate_socket`）。**常駐0の状態からアクセスで起動**し、アイドル時に終了することを確認 |
 | **非Hubレジストリ** | **未達（Docker側の制約）**。下記参照 |
 
 ### 途中で摘出したバグ2件
@@ -163,7 +162,6 @@ Go実装を削除し Rust で再実装（`../wtx/src/`）。
 
 | 項目 | 結果 |
 |---|---|
-| VM作成（worktree / 通常リポジトリ） | 8.25秒 / 7.31秒 |
 | 隔離git（alternates が `/run/wtx/base.git/objects`） | 両モードでPASS |
 | VM内コミット | `c0cd863`（worktree）/ `df99924`（通常リポジトリ） |
 | **hooks注入の封じ込め** | 両モードでPASS（ホストの `.git/hooks` は不変、ブランチも不変） |
@@ -194,7 +192,6 @@ Go実装を削除し Rust で再実装（`../wtx/src/`）。
 - VMのobjectsはホスト`.git`をalternates参照するため、回収前のホスト側`git gc`で刈られうる
 - workdirが通常リポジトリ（linked worktreeでない）の場合は隔離gitが適用されない
 - ミラーはdocker.ioのみ（`registry-mirrors`自体がHub専用）。launchdオンデマンド起動は未実装
-- VM作成に3〜4分（provision済みイメージを焼けば短縮可能）
 
 ## フェーズ7: 環境の引き継ぎ（wtx up --from）
 
@@ -216,8 +213,7 @@ pull済みイメージ・導入済みツールも新VMに乗る。volume 単位�
   （`docker compose up` 後にサービスから引き継いだデータが読めた）。データ複製は
   dockerd の metadata.db を壊さないよう `docker volume create` → `_data` を `cp -a`（mv 不可）
 - **一貫性**: clone 元を停止して at-rest のディスクを複製（稼働中の `cp -a` と違い
-  書き込み途中のDBファイルを写す事故が無い）。復帰はバックグラウンドで、
-  実測ダウンタイムは約11秒（stop 00:32:17 → clone 完了・restart 開始 00:32:28）
+  書き込み途中のDBファイルを写す事故が無い）。復帰はバックグラウンドで行う
 - **コンテナは引き継がない**: `docker rm -fv` で全削除（compose が作り直す。
   `-v` で匿名 volume の蓄積も防ぐ）。引き継ぐ価値があるのは volume とイメージだけ
 
@@ -297,12 +293,12 @@ worktree内で完結するようにした（設計と却下案は docs/DESIGN-si
 
 | # | 項目 | 結果 |
 |---|---|---|
-| 1 | `simctl clone` がデータを引き継ぐか | **PASS** — デバイスdata直下とアプリ（Safari）のdataコンテナ内に置いたマーカーが両方clone先に存在。clone所要 約10秒 |
+| 1 | `simctl clone` がデータを引き継ぐか | **PASS** — デバイスdata直下とアプリ（Safari）のdataコンテナ内に置いたマーカーが両方clone先に存在 |
 | 2 | clone に clone 元の Shutdown が必要か | **PASS（必要）** — Booted のまま clone すると SimError 405 `Unable to clone device in current state: Booted`。`--from` のVM複製と同じ「止めて写して戻す」を採用 |
 | 3 | `SIMCTL_CHILD_*` がアプリプロセスに届くか | **PASS** — `SIMCTL_CHILD_WTX_PROBE=... simctl launch` した Safari のプロセス環境（`ps eww`）に `WTX_PROBE` が出現 |
 | 4 | orca emulator がUDIDを受けるか | **PASS** — `orca emulator devices` はwtx作成デバイスを `id`=UDID で列挙。未登録パスへの `attach` は `selector_not_found` の明確なエラー。リポジトリを `orca repo add` してからの `attach <UDID> --worktree path:<リポジトリ>` は `attached: true` で完走し、helper（ws/stream/ax エンドポイント）が起動した |
 | 5 | VM再起動をまたぐ forward 再確立 | **PASS** — VM停止で ssh マスターは自然終了しソケットも消える（残骸unforwardの前置は不要と判明。異常終了の保険として `ensure_forward` は掃除してから張る） |
-| 6 | 起動中シミュレータのコスト | boot 約19秒（headless、GUIなし）。RSS合計は共有ページで28GBに膨らみ実態を示さない。shutdown時のvm_stat差分で実消費はGB級（3〜7GiB。他プロセス込みの粗い値）→ **boot on demand・VM削除時shutdownの方針を裏付け** |
+| 6 | 起動中シミュレータのコスト | RSSは共有ページを含み、shutdown前後のvm_stat差分にも他プロセスが混ざるため、信頼できる値を分離できなかった。保守的に**boot on demand・VM削除時shutdown**を採用 |
 
 実装上の知見: `simctl create` はruntime省略時に案内行がUDIDと同じstdoutに混ざる
 （2行になる）。**runtimeを明示すると出力はUDID 1行**になるので、wtxは常に明示する。

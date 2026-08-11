@@ -13,17 +13,19 @@ Run `wtx --help` or `wtx <command> --help` for the authoritative option list.
 | `wtx shell [NAME]` | Open an interactive VM shell. NAME resolves from the current directory when omitted. |
 | `wtx ls [--json]` | List VMs and flag VMs whose worktrees are gone. |
 | `wtx` / `wtx tui` | Open the TUI console; `--snapshot` renders one frame without a tty. |
+| `wtx port add [--name NAME] LABEL:GUEST` | Allocate, record, and arm a collision-free host port for a VM service. |
+| `wtx env [NAME] [--json]` | Print `WTX_VM_NAME`, `WTX_WORKDIR`, and `WTX_PORT_*`; re-arm recorded forwards. |
 | `wtx forward [--name NAME] HOST:GUEST` | Publish a VM port on the host with SSH local forwarding. |
 | `wtx bridge [--name NAME] HOST:GUEST` | Expose a host port at a guest port with SSH remote forwarding. |
 | `wtx unforward [--name NAME] PORT` | Stop a forward or bridge. |
 | `wtx stop [NAME]` | Stop a VM and its booted worktree simulator. |
 | `wtx rm NAME [--if-exists] [--json] [--with-worktree]` | Delete a VM, optionally with an idempotent receipt or its linked worktree. |
 | `wtx prune [--yes]` | Delete VMs whose worktrees no longer exist. |
-| `wtx image build\|rm\|status` | Manage the golden VM. |
+| `wtx image build\|rm\|status` | Inspect, prewarm, or reset the automatically managed shared base VM. |
 | `wtx mirror install\|uninstall\|up\|down\|status\|gc` | Manage the bounded registry cache. |
 | `wtx which` | Print the VM name for the current worktree. |
 | `wtx completions SHELL` | Print completions for bash, zsh, fish, elvish, or PowerShell. |
-| `wtx sim up\|status\|wire\|env\|rm` | Manage a per-worktree iOS simulator. |
+| `wtx sim up\|status\|rm` | Manage a per-worktree iOS simulator. `wire` and `env` remain as compatibility aliases. |
 | `wtx upgrade` | Refresh Homebrew tap metadata and upgrade wtx. |
 | `wtx update check [--json]` | Check GitHub Releases for a newer version without installing it. |
 
@@ -38,6 +40,6 @@ wtx exec -- bash -c 'command-a | command-b'
 
 ## Automation
 
-`ensure`, `inspect`, `ls`, `rm`, `sim env`, and update checks expose JSON where scripts need
+`ensure`, `inspect`, `ls`, `rm`, `env`, and update checks expose JSON where scripts need
 stable machine-readable output. The orchestrator ownership boundary and receipt schema are
 documented in [DESIGN-orchestration.md](DESIGN-orchestration.md).

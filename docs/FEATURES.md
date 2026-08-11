@@ -41,13 +41,26 @@ a blob is stored only after its SHA-256 digest verifies. Manifests are always re
 upstream because tags can move.
 
 `wtx mirror install` registers launchd socket activation. The cache starts on the first pull
-and exits after 10 idle minutes. Its default 20 GiB limit is enforced by evicting the oldest
-blobs after writes; `wtx mirror gc --max-gib N` changes the persistent limit and collects
-immediately.
+and exits when idle. Its default 20 GiB limit is enforced by evicting the oldest blobs after
+writes; `wtx mirror gc --max-gib N` changes the persistent limit and collects immediately.
 
 Docker Engine applies transparent `registry-mirrors` only to Docker Hub, so the default
 installation enables that endpoint alone. Extra registries can be configured in
 `~/.wtx/mirrors.json` for explicit localhost pulls.
+
+## Named host ports (`wtx port` / `wtx env`)
+
+`wtx port add api:3000` allocates a free host port, records it under the `api` label, and
+forwards it to port 3000 in the current worktree's VM. This works for any VM service and does
+not require an iOS simulator. Use `--name NAME` when running outside the worktree.
+
+`eval "$(wtx env)"` exports the allocation as `WTX_PORT_API` together with `WTX_VM_NAME` and
+`WTX_WORKDIR`. `wtx env --json` returns the same data for agents and scripts. Both forms
+re-arm recorded SSH forwards after a VM restart. Seeded VMs retain label-to-guest definitions
+but receive new host ports, so source and destination can run concurrently.
+
+Use `wtx forward HOST:GUEST` when a specific host port is required. The older `wtx sim wire`
+and `wtx sim env` forms remain compatibility aliases for `wtx port add` and `wtx env`.
 
 ## Per-worktree iOS simulators (`wtx sim`)
 
@@ -55,8 +68,8 @@ CoreSimulator runs on the macOS host, so wtx creates a host-side device named `w
 ties its lifecycle to the worktree VM. `wtx up --sim` creates it, `rm` and `prune` remove it,
 and `--from` clones its apps and data.
 
-`wtx sim wire api:3000` allocates and records a host port for a VM port. From the worktree,
-`eval "$(wtx sim env)"` exports `WTX_SIM_UDID` and named port variables such as
+`wtx port add api:3000` allocates and records a host port for a VM port. From the worktree,
+`eval "$(wtx env)"` exports `WTX_SIM_UDID` and named port variables such as
 `WTX_PORT_API`. External tools should resolve `sim_udid` immediately before use and bind that
 exact device rather than choosing the first booted or focused simulator.
 

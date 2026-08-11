@@ -34,7 +34,7 @@ worktreeのソースはホストと同じ絶対パスで両側から見えるた
 - `wtx rm NAME` はwtxが作ったデバイスを `simctl delete` する。`wtx prune` も同様で、破壊的操作なので既存の `--yes` ゲートに従う
 - `wtx ls` とTUIはデバイスの状態（Booted / Shutdown）を併記する
 - `wtx up --from SRC` はSRCのデバイスを `simctl clone` する。VMのclone（volume、イメージの引き継ぎ）と対になり、インストール済みアプリとそのデータごと新worktreeに乗る想定（要検証）
-- ブートは必要になるまで行わず、`wtx rm` とVM停止時にはshutdownする。起動中のシミュレータは1台あたりGB級のメモリを使うためである（実測は検証項目）
+- ブートは必要になるまで行わず、不要なresource消費を避けるため`wtx rm`とVM停止時にはshutdownする
 
 `--sim` を付けずに作ったVMには `wtx sim up [NAME] [DEVICE_TYPE]` で後からデバイスを追加できる（冪等）。
 VMの作り直しを要求しないための救済経路であり、エージェント自身がデバイスを確保するときの入口でもある。
@@ -60,17 +60,18 @@ wtxは既にmacOSとLimaを前提にしているので、Xcodeコマンドライ
 この間を `wtx forward`（ssh -L）で繋ぐが、複数worktreeが同じホストポートを取り合わないよう、wtxがホストポートを払い出して記録する。
 
 ```bash
-wtx sim wire api:3000     # VM内3000をホスト側の空きポートへ。割当を記録してforwardを張る
-wtx sim env               # WTX_VM_NAME / WTX_SIM_UDID / WTX_PORT_API などを出力（evalで取り込む）
+wtx port add api:3000     # VM内3000をホスト側の空きポートへ。割当を記録してforwardを張る
+wtx env                    # WTX_VM_NAME / WTX_SIM_UDID / WTX_PORT_API などを出力（evalで取り込む）
 wtx sim status            # デバイス状態とforwardの生死
 ```
 
 いずれもNAME省略時はworktreeから解決する。
-`wtx sim env` と `wtx sim status` は `--json` でツール向け出力も持つ。
+`wtx env` と `wtx sim status` は `--json` でツール向け出力も持つ。ポート配線はSimulatorに
+依存しないためtop-level commandを正規入口とし、`wtx sim wire` / `wtx sim env`は互換aliasとして残す。
 
 - ホストポートは固定レンジ（42000〜42999）からの順次割当とし、全 `~/.wtx/*.json` の記録値を避けたうえで実際にbindできることも確かめる。名前のハッシュから導く案は、衝突が起きたとき気付けないので採らない。記録された値はJSONを見れば監査できる
-- 既知の制約: 複数worktreeで同時に `wtx sim wire` を走らせると、走査とbind確認の間に割当が競合しうる（TOCTOU）。その場合は後発のssh bindが音を立てて失敗するので、再実行すれば次のポートに逃げる。ロックは入れていない
-- 現行の `ssh -L` はVMが停止すると死に、再確立の仕組みが無い。そこで割当をメタデータに記録し、`wtx up` での再アタッチ時と `wtx sim env` 実行時に、死んでいるforwardを張り直す（**arm on demand**）。この再確立が本設計で唯一の新しいインフラである
+- 既知の制約: 複数worktreeで同時に `wtx port add` を走らせると、走査とbind確認の間に割当が競合しうる（TOCTOU）。その場合は後発のssh bindが音を立てて失敗するので、再実行すれば次のポートに逃げる。ロックは入れていない
+- 現行の `ssh -L` はVMが停止すると死に、再確立の仕組みが無い。そこで割当をメタデータに記録し、`wtx up` での再アタッチ時と `wtx env` 実行時に、死んでいるforwardを張り直す（**arm on demand**）。この再確立が本設計で唯一の新しいインフラである
 
 ### アプリ側に求める契約
 
@@ -90,8 +91,8 @@ DerivedDataをworktree内（例: `.wtx-derived/`）に置けば、worktree間で
 wtx up mono-feat-a ~/repos/mono-feat-a --sim "iPhone 16 Pro"
 cd ~/repos/mono-feat-a
 wtx exec -- docker compose up -d --wait
-wtx sim wire api:3000
-eval "$(wtx sim env)"
+wtx port add api:3000
+eval "$(wtx env)"
 
 xcodebuild -workspace App.xcworkspace -scheme App \
   -destination "id=$WTX_SIM_UDID" -derivedDataPath .wtx-derived build
@@ -107,8 +108,8 @@ SIMCTL_CHILD_API_BASE_URL="http://127.0.0.1:$WTX_PORT_API" \
 
 ```
 - shellから直接使う場合は、セッション開始時と長い待機・VM再起動後にworktreeディレクトリで
-  eval "$(wtx sim env)" を実行する。エージェントや外部ツールから使う場合は、操作開始の直前に
-  同じディレクトリで wtx sim env --json を実行し、sim_udidを解決する。
+  eval "$(wtx env)" を実行する。エージェントや外部ツールから使う場合は、操作開始の直前に
+  同じディレクトリで wtx env --json を実行し、sim_udidを解決する。
   ポートやUDIDは変わりうるのでセッションをまたいでキャッシュしない
 - シミュレータは $WTX_SIM_UDID のデバイスだけを使う。
   他のデバイスを作成・起動・削除しない
@@ -126,7 +127,7 @@ SIMCTL_CHILD_API_BASE_URL="http://127.0.0.1:$WTX_PORT_API" \
 Argent、agent-browser、Xcode連携、Computer Useなどの外部ツールも、個別adapterではなく
 次の共通契約で扱う。
 
-1. 操作直前に対象worktreeの `wtx sim env --json` が返す空でない`sim_udid`を解決し、その作業で
+1. 操作直前に対象worktreeの `wtx env --json` が返す空でない`sim_udid`を解決し、その作業で
    唯一使用可能なSimulator IDとする。空なら操作を開始しない
 2. 外部ツールのhelp/schemaを確認し、完全なUDIDを渡せるtarget引数、UDID環境変数、
    担当UDIDへbind済みのworktree専用session、対応を検証済みの専用window/viewの順でbindする
@@ -168,24 +169,26 @@ VM内で動くエージェントからのシミュレータ操作は、`wtx brid
 3. `SIMCTL_CHILD_*`: **アプリプロセスに届く**（`ps eww` で環境変数を確認）
 4. orca attach: devices一覧が `id`=UDID でwtxデバイスを列挙。`orca repo add` 済みリポジトリへの `attach <UDID> --worktree path:...` は `attached: true` で完走（helperのws/stream/axエンドポイントが起動）
 5. forward再確立: VM停止でsshマスターは自然終了しソケットも消える。`ensure_forward` は残骸掃除＋再張りの冪等実装
-6. メモリ: boot約19秒、実消費GB級 → boot on demand・削除時shutdownを採用
+6. resource計測: simulator単体の信頼できる値を分離できなかったため、boot on demand・削除時shutdownを採用
 
 ## CLIサーフェス（実装形）
 
 ```
 wtx which                             # カレントディレクトリ → VM名
+wtx port add LABEL:GUESTPORT          # ホストポート払い出し＋forward（冪等、Simulator不要）
+wtx env [NAME] [--json]               # eval/JSON出力。死んだforwardの再arm
 wtx up NAME DIR --sim                 # VM作成と同時にデバイス作成（--sim-device TYPE で機種指定）
 wtx up NAME DIR --from SRC            # SRCにデバイスがあれば自動でclone（ポート定義も引き継ぎ）
 wtx sim up [NAME] [--device TYPE]     # 既存VMへデバイスを後付け（冪等。消失デバイスの再作成も）
 wtx sim status [NAME] [--json]        # デバイス状態とforward生死
-wtx sim wire LABEL:GUESTPORT [NAME]   # ホストポート払い出し＋forward（冪等）
-wtx sim env [NAME] [--json]           # eval用の環境変数出力。死んだforwardの再arm
+wtx sim wire LABEL:GUESTPORT [NAME]   # `wtx port add`の互換alias
+wtx sim env [NAME] [--json]           # `wtx env`の互換alias
 wtx sim rm [NAME]                     # デバイスのみ削除
 ```
 
 NAMEはすべて省略可能で、省略時はカレントディレクトリのworktreeから解決する。
 設計案の `--sim [DEVICE_TYPE]`（値が省略可能なフラグ）は、後続の位置引数（追加マウント）を
 値として飲み込む誤解析があるため、`--sim` ＋ `--sim-device TYPE` の2フラグに分けた。
-`sim wire` のNAMEが後置なのも同じ理由（省略可能な位置引数は必須引数に先行できない）。
+互換aliasである`sim wire`のNAMEが後置なのも同じ理由（省略可能な位置引数は必須引数に先行できない）。
 `wtx stop` / TUIのstopは起動中デバイスをshutdownし、`wtx up`は記録済みforwardを再armする。
 `wtx rm` / `wtx prune` / `wtx ls` / TUIのsim表示も対応済み。

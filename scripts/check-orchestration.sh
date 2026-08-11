@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# P0 オーケストレータ契約を実VMで検証する。
-# 一時リポジトリと専用VMを作り、終了時にこのスクリプトが作った対象だけを削除する。
+# Verify the P0 orchestrator contract with a real VM.
+# Create a temporary repository and dedicated VM, then delete only resources created by this
+# script when it exits.
 set -euo pipefail
 
 WTX=${WTX:-$(cd "$(dirname "$0")/.." && pwd)/target/release/wtx}

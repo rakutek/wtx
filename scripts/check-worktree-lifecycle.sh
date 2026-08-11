@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# wtx の worktree ライフサイクル（作成→VM内コミットがホストに直接反映→削除→孤児検出→prune）を
-# 通しで検証する。git はホストと rw 共有なので、VM内コミットは即ホストのブランチに現れる。
+# Verify the wtx worktree lifecycle end to end: creation, direct host visibility of in-VM
+# commits, deletion, orphan detection, and pruning. Git is shared read-write from the host,
+# so commits made in a VM immediately appear on its host branch.
 #
-# 実際にVMを2台作って消すため 1〜2分かかる。既に孤児VMがある場合は、prune が
-# ユーザーのVMを巻き込む恐れがあるので中止する。
-#   使い方: scripts/check-worktree-lifecycle.sh
+# This creates and deletes two real VMs. Abort when orphaned VMs already exist so the prune
+# check cannot affect the user's VMs.
+# Usage: scripts/check-worktree-lifecycle.sh
 set -u
 WTX=${WTX:-$(command -v wtx 2>/dev/null || echo "$(cd "$(dirname "$0")/.." && pwd)/target/release/wtx")}
 REPO=${WTX_CHECK_REPO:-$HOME/wtxcheck}
@@ -28,6 +29,7 @@ chk "wtx --help に sync が無い"             "! $WTX --help | grep -q '^  syn
 chk "wtx rm --help に --with-worktree がある" "$WTX rm --help | grep -q -- '--with-worktree'"
 chk "wtx rm --help に --force が無い"        "! $WTX rm --help | grep -q -- '--force'"
 chk "wtx prune --help に --yes がある"       "$WTX prune --help | grep -q -- '--yes'"
+chk "wtx --help に port/env がある"          "$WTX --help | grep -q '^  port' && $WTX --help | grep -q '^  env'"
 
 echo "=== 2. 検証用リポジトリと worktree 2本 ==="
 rm -rf "$REPO" "$REPO-a" "$REPO-b"
@@ -49,11 +51,20 @@ else
   echo "SKIP  ホストに ~/.claude が無いため確認省略"
 fi
 if [ -n "${SSH_AUTH_SOCK:-}" ]; then
-  # ssh-add -l は 鍵あり=0 / 鍵なし=1 / agent不達=2。フォワード自体の確認なので 2 以外なら成功
+  # `ssh-add -l` returns 0 with keys, 1 without keys, and 2 when the agent is unreachable.
+  # This checks forwarding itself, so any result other than 2 succeeds.
   chk "--agent-access VMでは ssh-agent が届く" "$WTX exec wtxcheck-a -- bash -c 'ssh-add -l >/dev/null 2>&1; [ \$? -ne 2 ]'"
 else
   echo "SKIP  ホストに SSH_AUTH_SOCK が無いため確認省略"
 fi
+
+echo "=== 2c. Simulatorなしのnamed port ==="
+$WTX exec wtxcheck-b -- bash -c 'nohup python3 -m http.server 8765 >/dev/null 2>&1 & sleep 1' >/dev/null 2>&1
+(cd "$REPO-b" && $WTX port add api:8765 >/dev/null 2>&1) || fail "port add api:8765"
+PORT_API=$(cd "$REPO-b" && $WTX env --json | python3 -c 'import json, sys; print(json.load(sys.stdin)["ports"]["api"]["host"])')
+chk "env --jsonがhost portを返す"           "test -n '$PORT_API'"
+chk "自動割当forwardでVM serviceへ届く"     "curl -s -o /dev/null --max-time 5 http://127.0.0.1:$PORT_API/"
+chk "shell envも同じWTX_PORT_APIを返す"     "cd '$REPO-b' && eval \"\$($WTX env)\" && test \"\$WTX_PORT_API\" = '$PORT_API'"
 
 echo "=== 3. TUI がプロジェクト単位でまとめる ==="
 $WTX tui --snapshot > /tmp/wtxcheck-tui1.txt 2>&1

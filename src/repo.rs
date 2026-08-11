@@ -1,10 +1,11 @@
-//! workdir が linked worktree か通常リポジトリかの判別。
-//! VM はホストの .git をそのまま rw マウントで共有するため（VM内コミット＝ホストに直接反映）、
-//! ここで得た情報はマウント構成・メタデータ・`rm --with-worktree` にだけ使う。
+//! Distinguishes a linked worktree from a regular repository.
+//! The VM shares the host's `.git` through a read-write mount, so commits made in the VM
+//! appear directly on the host. This information is used only for mounts, metadata, and
+//! `rm --with-worktree`.
 use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepoKind {
     Worktree,
     Normal,
@@ -13,8 +14,8 @@ pub enum RepoKind {
 #[derive(Debug, Clone)]
 pub struct RepoInfo {
     pub kind: RepoKind,
-    pub host_git: PathBuf,  // ホスト側の .git 実体（VM内でも同じパスに見える）
-    pub host_repo: PathBuf, // リポジトリルート（worktreeならメインリポジトリ）
+    pub host_git: PathBuf, // The host's actual `.git`, visible at the same path in the VM.
+    pub host_repo: PathBuf, // Repository root, or the main repository for a worktree.
     pub branch: String,
 }
 
@@ -24,12 +25,14 @@ fn head_branch(git_dir: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// workdir が linked worktree か通常リポジトリかを判別する。gitリポジトリでなければ None。
+/// Determine whether workdir is a linked worktree or a regular repository.
+/// Return None when it is not a Git repository.
 pub fn inspect_repo(workdir: &Path) -> Result<Option<RepoInfo>> {
     let dot = workdir.join(".git");
     let md = match std::fs::metadata(&dot) {
         Ok(m) => m,
-        Err(_) => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
     };
     if md.is_dir() {
         return Ok(Some(RepoInfo {
@@ -57,7 +60,10 @@ pub fn inspect_repo(workdir: &Path) -> Result<Option<RepoInfo>> {
     Ok(Some(RepoInfo {
         kind: RepoKind::Worktree,
         branch: head_branch(&gd),
-        host_repo: host_git.parent().unwrap_or(Path::new("/")).to_path_buf(),
+        host_repo: host_git
+            .parent()
+            .unwrap_or_else(|| Path::new("/"))
+            .to_path_buf(),
         host_git,
     }))
 }

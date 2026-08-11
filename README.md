@@ -33,7 +33,7 @@ and container-dependent tests run through `wtx exec`. Docker Desktop is not requ
 │   books-api               Running       books-api       sim:Booted        │
 │   hono-dev                Running       main                              │
 │ ▾ myapp  ~/repos/myapp  [1/2 running]                                     │
-│   myapp-feature-a         ⠹ start 8s    feature-a                         │
+│   myapp-feature-a         ⠹ starting    feature-a                         │
 │   myapp-feature-b         Stopped       feature-b                         │
 │ ▾ (no project)  [0/1 running]                                             │
 │   wtx-golden              Stopped                                         │
@@ -44,8 +44,8 @@ and container-dependent tests run through `wtx exec`. Docker Desktop is not requ
 
 ## Highlights
 
-- **A new VM in about 8 seconds:** clone a pre-provisioned golden VM instead of waiting
-  3–4 minutes for fresh provisioning.
+- **Start from a prepared VM:** clone a pre-provisioned golden VM instead of provisioning
+  every environment from scratch.
 - **Clone the useful state:** `wtx up --from` carries database volumes, images, installed
   tools, and optionally simulator data into a new worktree.
 - **Keep normal ports:** every worktree can use its usual `localhost:5432`; no branch-specific
@@ -85,13 +85,12 @@ brew install rakutek/tap/wtx
 ## Quick start
 
 ```bash
-wtx image build       # one-time: build the golden VM (3–4 min)
-
 cd ~/repos/myapp
-wtx new feature-a     # create a worktree and its VM (~8 s)
+wtx new feature-a     # create a worktree and VM; first use prepares the shared base VM
 cd ../myapp-feature-a
 wtx exec -- docker compose up -d --wait
-wtx forward 8080:3000 # host localhost:8080 -> VM port 3000
+wtx port add web:3000 # allocate a collision-free host port for VM port 3000
+eval "$(wtx env)"     # exports WTX_PORT_WEB and re-arms the forward when needed
 
 cd ~/repos/myapp
 wtx new feature-b --from myapp-feature-a # carry over DB data, images, and tools
@@ -121,11 +120,13 @@ flowchart LR
     AG -->|"wtx exec"| BD
 ```
 
-- The golden VM is provisioned once; `wtx up` uses `limactl clone` for later environments.
+- On first use, wtx automatically provisions a shared base VM. Later environments use
+  `limactl clone`; an incompatible base is refreshed automatically.
 - virtiofs mounts each worktree at the same absolute path as the host, including writable Git
   metadata.
-- Lima automatic port forwarding is disabled. Use `wtx forward` to publish a VM service and
-  `wtx bridge` to expose a host service inside a VM.
+- Lima automatic port forwarding is disabled. Use `wtx port add api:3000` for a recorded,
+  automatically allocated host port, `wtx forward` for an explicit host port, and `wtx bridge`
+  to expose a host service inside a VM.
 - Each VM defaults to 4 GiB RAM, 2 CPUs, and a 20 GiB disk. If full runtime isolation is not
   worth that cost, use plain worktrees or Compose project names instead.
 
@@ -141,6 +142,8 @@ simulators, the TUI, and updates in detail.
 | `wtx exec -- CMD…` | Run a command in the current worktree's VM |
 | `wtx shell [NAME]` | Open a VM shell |
 | `wtx ls` | List VMs and flag orphaned ones |
+| `wtx port add LABEL:GUEST` | Allocate and record a host port for a VM service |
+| `wtx env` | Export `WTX_PORT_*` values and re-arm recorded forwards |
 | `wtx forward HOST:GUEST` | Publish a VM port on the host |
 | `wtx stop [NAME]` / `wtx rm NAME` | Stop or remove a VM |
 | `wtx prune --yes` | Remove VMs whose worktrees are gone |
@@ -159,8 +162,26 @@ wtx exec --name worker-a -w /abs/worktree -- docker compose up -d --wait
 ```
 
 The readiness schema and cleanup order are documented in the
-[orchestrator contract](docs/DESIGN-orchestration.md). The bundled
-[agent skill](skills/wtx/SKILL.md) can be installed with `npx skills add rakutek/wtx`.
+[orchestrator contract](docs/DESIGN-orchestration.md).
+
+## Agent skill
+
+This repository includes an [agent skill](skills/wtx/SKILL.md) that teaches compatible
+coding agents how to set up and operate wtx. Install it with the Agent Skills CLI:
+
+```bash
+npx skills add rakutek/wtx
+```
+
+In Codex, you can instead ask the built-in skill installer from a Codex prompt:
+
+```text
+$skill-installer install the skill from https://github.com/rakutek/wtx/tree/main/skills/wtx
+```
+
+The skill does not install the `wtx` executable itself; install wtx with Homebrew first.
+After installation, Codex can discover the skill automatically, or you can select it with
+`/skills` and invoke it explicitly as `$wtx`. Restart Codex if it does not appear.
 
 ## Documentation
 

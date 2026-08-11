@@ -28,19 +28,20 @@ worktreeとgit metadataはホストと共有され、VM内コミットは即ホ�
 agent・編集・Git・資格情報はhost、Docker/DB/serviceだけVMへ送るのが標準形。
 
 コマンドやフラグを暗記や推測で書かないこと。実行前に `wtx --help` /
-`wtx <cmd> --help` で確認する。`image`と`mirror`も型付きsubcommandとしてhelpに列挙される。
+`wtx <cmd> --help` で確認する。`image`と`mirror`の公開subcommandもhelpに列挙される。
 
 ## セットアップ（初回のみ）
 
 ```bash
-brew install lima
-cargo build --release          # リポジトリ: https://github.com/rakutek/wtx
+brew install rakutek/tap/wtx
 wtx mirror install             # 任意: レジストリキャッシュ（launchdオンデマンド、常駐なし）
-wtx image build                # ゴールデンVM構築（3〜4分）
 ```
 
-ゴールデンVMがあると以後の `wtx up` は `limactl clone` で約8秒。無い・古い場合は
-別環境へ黙ってfallbackせず失敗する。fresh構築が必要なら`--no-clone`を明示する。
+sourceから導入する場合だけ、リポジトリをcloneし、Limaを導入して`cargo install --path .`を実行する。
+`cargo build --release`だけでは`wtx`をPATHへ導入できない。
+
+初回の `wtx new` / `wtx up` は共通のゴールデンVMを自動構築し、以後は `limactl clone` を使う。
+ゴールデンVMが古い場合も必要時に自動再構築する。fresh構築が必要なら`--no-clone`を明示する。
 
 ## 基本フロー
 
@@ -53,6 +54,8 @@ wtx ensure NAME ~/repos/worktree-dir --json # 冪等に作成/起動し、docker
 wtx inspect NAME --json                # runtime・worktree・owner・port・sim状態
 wtx exec -- docker compose up -d --wait # worktree内ではNAME/-w不要
 wtx exec --name NAME -- docker compose up -d --wait # 明示形
+wtx port add api:3000                   # VM内portへ衝突しないhost portを自動割当
+eval "$(wtx env)"                       # WTX_PORT_API等をexportしforwardを再接続
 wtx shell                              # worktree内ではNAME省略
 wtx rm NAME [--if-exists --json]       # 対応版ではオーケストレータ向け冪等cleanup
 wtx rm NAME [--with-worktree]          # 単独利用向け削除（コミットはホストに残る）
@@ -102,7 +105,7 @@ wtxを呼ぶたびには実行しない。
 5. secretや未解決placeholderが必要なら値を推測せず停止して報告する。設定値をログへ表示しない
 
 別worktreeやmainの`.env`をコピーしない。`.env.example`以外の候補を自動選択しない。
-`WTX_SIM_UDID`や`WTX_PORT_*`など動的なwtx値を`.env`へ保存せず、使用直前にwtxから解決する。
+`WTX_SIM_UDID`や`WTX_PORT_*`など動的なwtx値を`.env`へ保存せず、使用直前に`wtx env`から解決する。
 同梱scriptは`.env.example`から欠けている`.env`を作るだけで、依存導入や任意のsetup commandは
 実行しないため、Orca、Herdr、Codex、手動worktreeのどれでも同じfallbackとして使える。
 
@@ -112,7 +115,7 @@ wtxを呼ぶたびには実行しない。
 docker volume（DBデータ）・pull済みイメージ・導入済みツールが新VMに乗るので、
 マイグレーション済み・データ投入済みの「メインVM」から新しい worktree のVMを生やすのが基本形。
 
-- SRC は複製の間だけ停止し（約10秒）、バックグラウンドで自動復帰する。`wtx ls` で確認
+- SRC は複製の間だけ停止し、バックグラウンドで自動復帰する。`wtx ls` で確認
 - compose の volume 名接頭辞（プロジェクト名 = ディレクトリ名）は自動で新側に付け替わる。
   compose ファイルで `name:` を固定している場合は接頭辞が変わらないのでそのまま使われる
 - clone 元のコンテナは新VMでは消される（`docker compose up` で作り直す）。
@@ -160,10 +163,18 @@ agent操作ではそれだけに依存しない。VMの寿命はworker terminal�
 Lima の自動フォワードは全無効化されている（複数 VM が各自の `localhost:5432` を持てる）。
 
 ```bash
+wtx port add api:3000     # cwdのVM内3000へ空きhost portを割り当て、記録してforward
+wtx env                   # WTX_VM_NAME / WTX_WORKDIR / WTX_PORT_API等（eval用）
+wtx env --json            # agent・script向け。記録済みforwardも再接続
 wtx forward 8080:3000    # HOST:GUEST — VMの3000番をhostの8080番へ (ssh -L)
 wtx bridge  9000:9001    # HOST:GUEST — hostの9000番をguestの9001番へ (ssh -R)
 wtx unforward 8080       # cwdのVMから解除。明示時は--name NAME
 ```
+
+`wtx port add [--name NAME] LABEL:GUESTPORT`はSimulatorなしでも使える正規入口で、同じlabelと
+guest portへの再実行は同じhost portを再利用する。`wtx env [NAME] [--json]`はVM再起動で死んだ
+forwardも再armする。host portを固定したい場合だけ`wtx forward`を使う。
+旧`wtx sim wire` / `wtx sim env`は互換aliasとして残る。
 
 ## worktree専用 iOS シミュレータ（wtx sim）
 
@@ -174,8 +185,8 @@ iOSアプリを含むリポジトリでは、worktreeごとに専用のシミュ
 このworktreeでシミュレータを使うときは、次を守ること:
 
 - shellから直接使う場合は、セッション開始時と長い待機・VM再起動後にworktreeディレクトリで
-  `eval "$(wtx sim env)"` を実行する。エージェントや外部ツールから使う場合は、操作開始の
-  直前に同じディレクトリで `wtx sim env --json` を実行し、`sim_udid` を解決する。
+  `eval "$(wtx env)"` を実行する。エージェントや外部ツールから使う場合は、操作開始の
+  直前に同じディレクトリで `wtx env --json` を実行し、`sim_udid` を解決する。
   ポートやUDIDは変わりうるので、セッションをまたいで値をキャッシュしない
 - シミュレータは `$WTX_SIM_UDID` のデバイス**だけ**を使う。他のデバイスを作成・起動・削除しない
 - ビルド: `xcodebuild -destination "id=$WTX_SIM_UDID" -derivedDataPath .wtx-derived ...`
@@ -183,7 +194,7 @@ iOSアプリを含むリポジトリでは、worktreeごとに専用のシミュ
   `SimError 405` になる。`xcrun simctl boot "$WTX_SIM_UDID" && xcrun simctl bootstatus "$WTX_SIM_UDID" -b`
   で起動を待つ（自分のデバイスの boot はこの節の禁止事項に含まれない）
 - 起動: `SIMCTL_CHILD_API_BASE_URL="http://127.0.0.1:$WTX_PORT_API" xcrun simctl launch "$WTX_SIM_UDID" <bundle-id>`
-  （`WTX_PORT_<LABEL>` は `wtx sim wire <label>:<VM内ポート>` で払い出したホストポート）
+  （`WTX_PORT_<LABEL>` は `wtx port add <label>:<VM内ポート>` で払い出したホストポート）
 - 操作: 外部ツールには後述の規約で担当UDIDを明示する。直接操作する場合は
   `xcrun simctl ... "$WTX_SIM_UDID" ...` のように対象を必ず指定する。wtx に操作コマンドは無い
 - VM側（db・api・docker）の作業は `wtx exec -- ...`（NAMEとworkdirは省略時に
@@ -197,7 +208,7 @@ Argent、agent-browser、Xcode連携、Computer Useなど、wtx外のツール�
 操作するときも、wtxにツール固有のadapterや設定を追加しない。AIエージェントが次の規約で
 担当デバイスへbindする:
 
-1. 操作開始の直前に対象worktreeで `wtx sim env --json` を実行し、返された空でない`sim_udid`を
+1. 操作開始の直前に対象worktreeで `wtx env --json` を実行し、返された空でない`sim_udid`を
    その作業で唯一使用可能なSimulator IDとする。空なら操作を開始しない
 2. 外部ツールのhelpまたはschemaを確認し、次のうち上から使える最も強い方法でbindする:
    - UDID / device ID / destinationを受け取る引数へ完全なUDIDを渡す
@@ -208,7 +219,7 @@ Argent、agent-browser、Xcode連携、Computer Useなど、wtx外のツール�
    デバイスを暗黙に選ばない。複数台が起動中でも担当UDID以外へfallbackしない
 4. 常駐するbrowser・MCP・GUI sessionはworktree単位で分離し、再接続時にも担当UDIDを再確認する
 5. 担当UDIDが見つからない、消えた、またはsessionとの対応を検証できない場合は操作を止め、
-   `wtx sim status --json` と `wtx sim env --json` で再解決する。別デバイスで継続しない
+   `wtx sim status --json` と `wtx env --json` で再解決する。別デバイスで継続しない
 6. shutdown、erase、delete、session closeなどのcleanupは、担当UDIDとそのworktree専用sessionだけを
    対象にする。ホスト全体や全Simulatorを対象にしたcleanupを行わない
 7. 外部ツールが完全なUDIDを指定できず、専用sessionまたは専用windowとの対応も検証できない場合、
@@ -218,22 +229,23 @@ Argent、agent-browser、Xcode連携、Computer Useなど、wtx外のツール�
 完全なUDIDに加えてworktree固有のsession/scope、Computer Useでは担当デバイスだと検証できる
 専用window/viewを使う。実際のfield名はツールのhelp/schemaで毎回確認し、名前から推測しない。
 
-`wtx sim env` は死んだ forward（VM再起動後など）を自動で張り直すので、
-接続できないときはまず `eval "$(wtx sim env)"` を再実行する。状態確認は
+`wtx env` は死んだ forward（VM再起動後など）を自動で張り直すので、
+接続できないときはまず `eval "$(wtx env)"` を再実行する。状態確認は
 `wtx sim status`（`--json` あり）。
 
 ## image / mirror
 
 ```bash
 wtx image  [status|build|rm]                        # 省略時 status
-wtx mirror [status|serve|up|down|install|uninstall|gc] # 省略時 status
+wtx mirror [status|up|down|install|uninstall|gc]    # 省略時 status
 ```
 
 - 既定endpointは、透過的に効くdocker.ioのみ。cacheは20GiB上限で自動GCされ、
   `wtx mirror gc --max-gib N`で永続上限を変更できる。
 - ミラーが落ちていても pull は上流直行にフォールバックする（ビルドは止まらない）。
 - `~/.wtx/mirrors.json` を編集したら `wtx mirror install` を再実行する。
-- ゴールデンVMはprovision schema receiptで互換性を確認する。古ければrebuildする。
+- ゴールデンVMはprovision schema receiptで互換性を確認し、必要時に自動再構築する。
+- `wtx image build`は事前warm-up用、`rm`はtroubleshooting用で、通常flowでは不要。
 
 ## 更新
 

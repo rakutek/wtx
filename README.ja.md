@@ -33,7 +33,7 @@ container依存testだけを`wtx exec`で実行する。Docker Desktopは不要�
 │   books-api               Running       books-api       sim:Booted        │
 │   hono-dev                Running       main                              │
 │ ▾ myapp  ~/repos/myapp  [1/2 running]                                     │
-│   myapp-feature-a         ⠹ start 8s    feature-a                         │
+│   myapp-feature-a         ⠹ starting    feature-a                         │
 │   myapp-feature-b         Stopped       feature-b                         │
 │ ▾ (no project)  [0/1 running]                                             │
 │   wtx-golden              Stopped                                         │
@@ -44,7 +44,7 @@ container依存testだけを`wtx exec`で実行する。Docker Desktopは不要�
 
 ## ハイライト
 
-- **新しいVMが約8秒：** 3〜4分かかる新規provisioningの代わりに、準備済みgolden VMをcloneする
+- **準備済みVMから開始：** 毎回新規provisioningせず、準備済みgolden VMをcloneする
 - **必要な状態を丸ごと引き継ぐ：** `wtx up --from`でDB volume、image、導入済みtool、
   必要ならSimulator dataも新しいworktreeへ移せる
 - **通常のportを維持：** どのworktreeも`localhost:5432`を使えるため、branch別offsetや
@@ -83,13 +83,12 @@ brew install rakutek/tap/wtx
 ## クイックスタート
 
 ```bash
-wtx image build       # 初回のみ: golden VMを構築（3〜4分）
-
 cd ~/repos/myapp
-wtx new feature-a     # worktreeとVMをまとめて作成（約8秒）
+wtx new feature-a     # worktreeとVMを作成。初回だけ共通base VMも自動準備
 cd ../myapp-feature-a
 wtx exec -- docker compose up -d --wait
-wtx forward 8080:3000 # host localhost:8080 -> VM port 3000
+wtx port add web:3000 # VMの3000番へ衝突しないhost portを自動割当
+eval "$(wtx env)"     # WTX_PORT_WEBをexportし、必要ならforwardを再接続
 
 cd ~/repos/myapp
 wtx new feature-b --from myapp-feature-a # DB data、image、toolを引き継ぐ
@@ -119,10 +118,11 @@ flowchart LR
     AG -->|"wtx exec"| BD
 ```
 
-- golden VMは一度だけprovisioningし、以後の`wtx up`は`limactl clone`を使う
+- 初回は共通base VMを自動provisioningし、以後の`wtx up`は`limactl clone`を使う。
+  baseに互換性がなければ自動更新する
 - virtiofsで各worktreeをhostと同じ絶対pathへmountし、書き込み可能なGit metadataも共有する
-- Limaの自動port forwardingは無効。`wtx forward`でVM serviceをhostへ公開し、
-  `wtx bridge`でhost serviceをVMへ届ける
+- Limaの自動port forwardingは無効。記録付き自動割当は`wtx port add api:3000`、host portを
+  明示する場合は`wtx forward`、host serviceをVMへ届ける場合は`wtx bridge`を使う
 - VMの既定値はRAM 4 GiB、CPU 2、disk 20 GiB。完全なruntime分離がそのcostに見合わない場合は、
   素のworktreeやCompose project名による分離を使う
 
@@ -138,6 +138,8 @@ flowchart LR
 | `wtx exec -- CMD…` | 現在のworktreeのVM内でcommandを実行 |
 | `wtx shell [NAME]` | VM内shellを開く |
 | `wtx ls` | VM一覧と孤児VMを表示 |
+| `wtx port add LABEL:GUEST` | VM service用のhost portを自動割当して記録 |
+| `wtx env` | `WTX_PORT_*`をexportし、記録済みforwardを再接続 |
 | `wtx forward HOST:GUEST` | VM portをhostへ公開 |
 | `wtx stop [NAME]` / `wtx rm NAME` | VMを停止・削除 |
 | `wtx prune --yes` | worktreeが消えたVMを削除 |
@@ -156,8 +158,28 @@ wtx exec --name worker-a -w /abs/worktree -- docker compose up -d --wait
 ```
 
 readiness schemaとcleanup順序は[オーケストレータ連携契約](docs/DESIGN-orchestration.md)に記載。
-同梱の[エージェント用skill](skills/wtx/SKILL.md)は
-`npx skills add rakutek/wtx`で導入できる。
+
+## エージェント用skill
+
+このrepositoryには、対応するcoding agentへwtxのsetup・運用方法を伝える
+[エージェント用skill](skills/wtx/SKILL.md)を同梱している。Agent Skills CLIでは
+次のcommandで導入できる。
+
+```bash
+npx skills add rakutek/wtx
+```
+
+Codexでは、会話から組み込みのskill installerへrepository内のskill pathを渡す方法も
+使える。
+
+```text
+$skill-installer install the skill from https://github.com/rakutek/wtx/tree/main/skills/wtx
+```
+
+skillは`wtx`実行file自体を導入しないため、先にHomebrewでwtx本体をインストールする。
+導入後、Codexはskillを自動検出する。`/skills`から選択するか、`$wtx`で明示的に
+呼び出せる。
+一覧に現れない場合はCodexを再起動する。
 
 ## ドキュメント
 

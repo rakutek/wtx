@@ -1,10 +1,13 @@
-//! wtx — worktree × コーディングエージェントの並列開発ツール。
-//! worktree ごとに独立VM（Lima/vz）+ VM内dockerd を与え、`up --from` で
-//! DB（volume）・イメージごと環境を引き継げる。git はホストと rw 共有
-//! （VM内コミット＝ホストに直接反映）。設計と検証記録は VERIFICATION.md を参照。
+//! wtx is a parallel development tool for coding agents using git worktrees.
+//! It gives each worktree an isolated VM (Lima/vz) with its own `dockerd`, while
+//! `up --from` can carry over the environment, including database volumes and images.
+//! Git is mounted read-write from the host, so commits made in the VM appear directly
+//! on the host. See VERIFICATION.md for the design and verification record.
+mod context;
 mod launchd;
 mod lima;
 mod mirror;
+mod port;
 mod repo;
 mod sim;
 mod sshx;
@@ -28,7 +31,7 @@ struct Cli {
     cmd: Option<Cmd>,
 }
 
-/// `wtx up` / `wtx new` 共通のVM作成フラグ。
+/// VM creation flags shared by `wtx up` and `wtx new`.
 #[derive(clap::Args)]
 struct UpFlags {
     /// Memory (default 4GiB; cloned VMs inherit their source unless set)
@@ -77,7 +80,7 @@ impl UpFlags {
     }
 }
 
-/// オーケストレータの所有情報。wtx は task 状態を管理せず、cleanup 用の来歴だけを保持する。
+/// Orchestrator ownership metadata. wtx records provenance for cleanup, not task state.
 #[derive(clap::Args, Default)]
 struct OwnerFlags {
     /// Owning orchestrator or actor, e.g. orca, herdr, manual
@@ -200,6 +203,19 @@ enum Cmd {
         #[arg(long)]
         snapshot: bool,
     },
+    /// Allocate and manage named host ports for VM services
+    Port {
+        #[command(subcommand)]
+        action: PortCmd,
+    },
+    /// Print eval-able VM and port environment variables; re-arm recorded forwards
+    Env {
+        /// VM name. Omit inside a worktree covered by a wtx VM
+        name: Option<String>,
+        /// Machine-readable output for scripts and agents
+        #[arg(long)]
+        json: bool,
+    },
     /// Publish a VM port on the host (ssh -L). SPEC is HOST:GUEST
     Forward {
         /// VM name. Omit inside a worktree covered by a wtx VM
@@ -248,7 +264,7 @@ enum Cmd {
         #[arg(long)]
         yes: bool,
     },
-    /// Manage the pre-provisioned golden VM
+    /// Inspect or manually manage the automatically prepared shared base VM
     Image {
         #[command(subcommand)]
         action: Option<ImageCmd>,
@@ -262,7 +278,7 @@ enum Cmd {
     Which,
     /// Print shell completions (bash|zsh|fish|elvish|powershell)
     Completions { shell: clap_complete::Shell },
-    /// Per-worktree iOS simulator: device lifecycle, port wiring, agent env vars
+    /// Per-worktree iOS simulator lifecycle
     Sim {
         #[command(subcommand)]
         action: Option<SimCmd>,
@@ -276,7 +292,19 @@ enum Cmd {
     },
 }
 
-/// NAME はすべて省略可能で、省略時はカレントディレクトリの worktree から解決する。
+#[derive(Subcommand)]
+enum PortCmd {
+    /// Allocate a host port for LABEL:GUESTPORT and start the forward (idempotent)
+    Add {
+        /// Service label and port inside the VM, e.g. api:3000
+        spec: String,
+        /// VM name. Omit inside a worktree covered by a wtx VM
+        #[arg(short = 'n', long)]
+        name: Option<String>,
+    },
+}
+
+/// NAME is optional throughout and is resolved from the current worktree when omitted.
 #[derive(Subcommand)]
 enum SimCmd {
     /// Create the worktree's simulator device (idempotent; also heals a deleted device)
@@ -292,9 +320,9 @@ enum SimCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Allocate a host port for a guest port and start the forward (idempotent): LABEL:GUESTPORT
+    /// Compatibility alias for `wtx port add LABEL:GUESTPORT`
     Wire { spec: String, name: Option<String> },
-    /// Print eval-able env (WTX_SIM_UDID, WTX_PORT_*...); re-arms dead forwards
+    /// Compatibility alias for `wtx env`
     Env {
         name: Option<String>,
         #[arg(long)]
@@ -316,11 +344,11 @@ enum UpdateCmd {
 
 #[derive(Subcommand)]
 enum ImageCmd {
-    /// Build the golden VM
+    /// Prepare the shared base VM before it is first needed
     Build,
-    /// Delete the golden VM
+    /// Delete the shared base VM
     Rm,
-    /// Show golden VM status
+    /// Show shared base VM status
     Status,
 }
 
@@ -348,8 +376,8 @@ enum MirrorCmd {
 }
 
 fn main() {
-    // `wtx ls | head` のようにパイプ先が先に閉じたとき、Rust 既定の SIGPIPE 無視のままだと
-    // 標準出力への書き込みが panic するので、通常の Unix コマンドと同じ挙動に戻す。
+    // Restore standard Unix behavior so writes to a closed pipe, such as in
+    // `wtx ls | head`, terminate via SIGPIPE instead of panicking on stdout.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     if let Err(e) = run() {
         eprintln!("wtx: {e}");
@@ -375,7 +403,8 @@ fn run() -> Result<()> {
             flags,
         }) => {
             let (name, workdir) = up_target(name, workdir)?;
-            lima::up(&name, &workdir, flags.into_opts(mounts))
+            let opts = flags.into_opts(mounts);
+            lima::up(&name, &workdir, &opts)
         }
         Some(Cmd::Ensure {
             name,
@@ -398,7 +427,8 @@ fn run() -> Result<()> {
         }
         Some(Cmd::Inspect { name, json }) => lima::inspect(name.as_deref(), json),
         Some(Cmd::New { branch, dir, flags }) => {
-            lima::new(&branch, dir.as_deref(), flags.into_opts(vec![]))
+            let opts = flags.into_opts(vec![]);
+            lima::new(&branch, dir.as_deref(), &opts)
         }
         Some(Cmd::Exec {
             name,
@@ -411,7 +441,7 @@ fn run() -> Result<()> {
             sshx::exec(&name, Some(&workdir), &cmd, tty)
         }
         Some(Cmd::Shell { name }) => {
-            let (name, _) = sim::resolve(name.as_deref())?;
+            let (name, _) = context::resolve(name.as_deref())?;
             sshx::shell(&name)
         }
         Some(Cmd::Ls { json }) => {
@@ -422,6 +452,10 @@ fn run() -> Result<()> {
                 Ok(())
             }
         }
+        Some(Cmd::Port { action }) => match action {
+            PortCmd::Add { spec, name } => port::add(name.as_deref(), &spec),
+        },
+        Some(Cmd::Env { name, json }) => port::env(name.as_deref(), json),
         Some(Cmd::Forward { name, args }) => {
             let (name, spec) = named_value(name.as_deref(), &args)?;
             sshx::forward(&name, &spec, false)
@@ -435,7 +469,7 @@ fn run() -> Result<()> {
             sshx::unforward(&name, &port)
         }
         Some(Cmd::Stop { name }) => {
-            let (name, _) = sim::resolve(name.as_deref())?;
+            let (name, _) = context::resolve(name.as_deref())?;
             lima::stop(&name, false).map_err(anyhow::Error::msg)
         }
         Some(Cmd::Rm {
@@ -451,7 +485,10 @@ fn run() -> Result<()> {
                 json,
             },
         ),
-        Some(Cmd::Prune { yes }) => lima::prune(yes),
+        Some(Cmd::Prune { yes }) => {
+            lima::prune(yes);
+            Ok(())
+        }
         Some(Cmd::Image { action }) => match action.unwrap_or(ImageCmd::Status) {
             ImageCmd::Build => lima::image_build(),
             ImageCmd::Rm => lima::image_rm(),
@@ -460,7 +497,7 @@ fn run() -> Result<()> {
                 Ok(())
             }
         },
-        Some(Cmd::Which) => sim::which(),
+        Some(Cmd::Which) => context::which(),
         Some(Cmd::Completions { shell }) => {
             clap_complete::generate(shell, &mut Cli::command(), "wtx", &mut std::io::stdout());
             Ok(())
@@ -472,8 +509,8 @@ fn run() -> Result<()> {
             }) {
                 SimCmd::Up { name, device } => sim::up(name.as_deref(), device.as_deref()),
                 SimCmd::Status { name, json } => sim::status(name.as_deref(), json),
-                SimCmd::Wire { spec, name } => sim::wire(name.as_deref(), &spec),
-                SimCmd::Env { name, json } => sim::env(name.as_deref(), json),
+                SimCmd::Wire { spec, name } => port::add(name.as_deref(), &spec),
+                SimCmd::Env { name, json } => port::env(name.as_deref(), json),
                 SimCmd::Rm { name } => sim::rm(name.as_deref()),
             }
         }
@@ -496,20 +533,21 @@ fn run() -> Result<()> {
     }
 }
 
-/// `exec` はcwd解決を優先する。旧 `wtx exec NAME CMD...` 形式は、先頭が実在する
-/// wtx VM名のときだけ互換経路として認識する。曖昧な場合は `--name` で明示できる。
+/// `exec` prioritizes cwd-based resolution. The legacy `wtx exec NAME CMD...` form is
+/// recognized only when its first argument names an existing wtx VM. Use `--name` to
+/// disambiguate.
 fn exec_target(
     explicit: Option<&str>,
     cmd: &mut Vec<String>,
 ) -> Result<(String, lima::InstanceMeta)> {
     if let Some(name) = explicit {
-        return sim::resolve(Some(name));
+        return context::resolve(Some(name));
     }
     if cmd.len() >= 2 && lima::load_meta(&cmd[0]).is_some() {
         let name = cmd.remove(0);
-        return sim::resolve(Some(&name));
+        return context::resolve(Some(&name));
     }
-    sim::resolve(None)
+    context::resolve(None)
 }
 
 fn default_guest_workdir(requested: Option<String>, meta: &lima::InstanceMeta) -> String {
@@ -523,23 +561,25 @@ fn default_guest_workdir(requested: Option<String>, meta: &lima::InstanceMeta) -
             let wd = Path::new(&meta.workdir);
             *p == wd || p.starts_with(wd)
         })
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| meta.workdir.clone())
+        .map_or_else(
+            || meta.workdir.clone(),
+            |p| p.to_string_lossy().into_owned(),
+        )
 }
 
-/// NAME省略時はcwdから解決し、2引数なら旧 `NAME VALUE` 形式として扱う。
+/// Resolve an omitted NAME from the cwd, or accept the legacy `NAME VALUE` two-argument form.
 fn named_value(explicit: Option<&str>, args: &[String]) -> Result<(String, String)> {
     match (explicit, args) {
         (Some(name), [value]) => {
-            let (name, _) = sim::resolve(Some(name))?;
+            let (name, _) = context::resolve(Some(name))?;
             Ok((name, value.clone()))
         }
         (None, [value]) => {
-            let (name, _) = sim::resolve(None)?;
+            let (name, _) = context::resolve(None)?;
             Ok((name, value.clone()))
         }
         (None, [name, value]) => {
-            let (name, _) = sim::resolve(Some(name))?;
+            let (name, _) = context::resolve(Some(name))?;
             Ok((name, value.clone()))
         }
         (Some(_), _) => Err(anyhow!("pass one value when --name is used")),
@@ -547,11 +587,12 @@ fn named_value(explicit: Option<&str>, args: &[String]) -> Result<(String, Strin
     }
 }
 
-/// `wtx up` の NAME/DIR 省略時の解決。
-/// - NAME だけ: 既存VMなら記録済み workdir へ再アタッチ、無ければカレントディレクトリに新規作成。
-///   ただし `/` を含む（またはVM未登録の既存ディレクトリを指す）1引数は DIR とみなす。
-/// - 両方省略: `wtx which` と同じ規則（メタデータ workdir の最長前方一致）で解決し、
-///   どのVMにも覆われていなければカレントディレクトリから名前を導出して新規作成する。
+/// Resolve omitted NAME and DIR arguments for `wtx up`.
+/// - NAME only: reattach an existing VM to its recorded workdir, or create a VM for the cwd.
+///   A single argument containing `/`, or naming an existing directory not registered to a
+///   VM, is treated as DIR instead.
+/// - Both omitted: use the same longest workdir-prefix rule as `wtx which`. If no VM covers
+///   the cwd, derive a name from the current directory and create a new VM.
 fn up_target(name: Option<String>, workdir: Option<String>) -> Result<(String, String)> {
     if let (Some(n), None) = (&name, &workdir) {
         let looks_like_dir =
@@ -573,7 +614,7 @@ fn up_target(name: Option<String>, workdir: Option<String>) -> Result<(String, S
             Ok((n, w))
         }
         (None, _) => {
-            let hits = sim::covering_cwd()?;
+            let hits = context::covering_cwd()?;
             match hits.len() {
                 1 => {
                     let (n, m) = hits.into_iter().next().unwrap();
@@ -644,6 +685,36 @@ mod tests {
             }
             _ => panic!("expected bridge"),
         }
+    }
+
+    #[test]
+    fn named_port_and_environment_commands_are_top_level() {
+        let cli =
+            Cli::try_parse_from(["wtx", "port", "add", "web-api:3000", "--name", "vm-a"]).unwrap();
+        match cli.cmd.unwrap() {
+            Cmd::Port {
+                action: PortCmd::Add { spec, name },
+            } => {
+                assert_eq!(spec, "web-api:3000");
+                assert_eq!(name.as_deref(), Some("vm-a"));
+            }
+            _ => panic!("expected port add"),
+        }
+
+        let cli = Cli::try_parse_from(["wtx", "env", "vm-a", "--json"]).unwrap();
+        match cli.cmd.unwrap() {
+            Cmd::Env { name, json } => {
+                assert_eq!(name.as_deref(), Some("vm-a"));
+                assert!(json);
+            }
+            _ => panic!("expected env"),
+        }
+    }
+
+    #[test]
+    fn simulator_port_commands_remain_compatible_aliases() {
+        assert!(Cli::try_parse_from(["wtx", "sim", "wire", "api:3000", "vm-a"]).is_ok());
+        assert!(Cli::try_parse_from(["wtx", "sim", "env", "vm-a", "--json"]).is_ok());
     }
 
     #[test]

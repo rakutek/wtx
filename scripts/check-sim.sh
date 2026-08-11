@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# wtx sim(worktree専用iOSシミュレータ)を実VM・実デバイスで通しで検証する。
+# Verify wtx sim (a worktree-specific iOS simulator) end to end with real VMs and devices.
 #
-# デバイス作成のVM連動・NAME省略解決・wire/envと再arm・--fromでのデバイスclone・
-# rm時の掃除を確認する。simctlを使うのでmacOS + Xcodeコマンドラインツールが必要。
-#   使い方: scripts/check-sim.sh   (VMを2台とデバイスを作って消すので数分かかる)
+# Covers VM-linked device creation, omitted-NAME resolution, wire/env and re-arming,
+# device cloning with `--from`, and cleanup during rm. Requires macOS and Xcode command-line
+# tools because it uses simctl.
+# Usage: scripts/check-sim.sh
 set -u
 WTX=${WTX:-$(command -v wtx 2>/dev/null || echo "$(cd "$(dirname "$0")/.." && pwd)/target/release/wtx")}
 BASE=${WTX_SIM_DIR:-$HOME/wtxsimcheck}
@@ -39,6 +40,7 @@ pass "検証用のVM名・デバイス名は未使用"
 
 echo "=== 1. ヘルプ ==="
 chk "wtx up --help に --sim がある"      "$WTX up --help | grep -q -- '--sim'"
+chk "wtx --help に port/env がある"       "$WTX --help | grep -q '^  port' && $WTX --help | grep -q '^  env'"
 chk "wtx sim --help に wire/env がある"  "$WTX sim --help | grep -q wire && $WTX sim --help | grep -q env"
 
 echo "=== 2. up --sim: VMとデバイスが同時にできる ==="
@@ -56,9 +58,9 @@ mkdir -p "$BASE/a/sub/deep"
 chk "サブディレクトリでも解決"           "cd '$BASE/a/sub/deep' && test \"\$($WTX which)\" = '$A'"
 chk "worktree外では明確なエラー"         "! (cd /tmp && $WTX which 2>/dev/null)"
 
-echo "=== 4. wire: ポート払い出しと実トラフィック ==="
-(cd "$BASE/a" && $WTX sim wire api:8765 >/dev/null 2>&1) || fail "sim wire api:8765"
-PORT_A=$(cd "$BASE/a" && eval "$($WTX sim env 2>/dev/null)" && echo "${WTX_PORT_API:-}")
+echo "=== 4. port add: ポート払い出しと実トラフィック ==="
+(cd "$BASE/a" && $WTX port add api:8765 >/dev/null 2>&1) || fail "port add api:8765"
+PORT_A=$(cd "$BASE/a" && eval "$($WTX env 2>/dev/null)" && echo "${WTX_PORT_API:-}")
 chk "ホストポートが払い出される"         "test -n '$PORT_A'"
 $WTX exec "$A" bash -c 'nohup python3 -m http.server 8765 >/dev/null 2>&1 & sleep 1' >/dev/null 2>&1
 chk "forward 経由でVM内サーバに届く"     "curl -s -o /dev/null --max-time 5 http://localhost:$PORT_A/"
@@ -69,10 +71,10 @@ $WTX stop "$A" >/dev/null 2>&1
 chk "wtx stopでSimulatorもShutdown" "xcrun simctl list devices | grep '$UDID_A' | grep -q '(Shutdown)'"
 limactl start "$A" --tty=false >/dev/null 2>&1
 chk "再起動直後は forward が落ちている"  "! curl -s -o /dev/null --max-time 3 http://localhost:$PORT_A/"
-(cd "$BASE/a" && eval "$($WTX sim env 2>/dev/null)") || fail "sim env(再arm)"
+(cd "$BASE/a" && eval "$($WTX env 2>/dev/null)") || fail "env(再arm)"
 $WTX exec "$A" bash -c 'nohup python3 -m http.server 8765 >/dev/null 2>&1 & sleep 1' >/dev/null 2>&1
 chk "env 後にトラフィックが復帰"         "curl -s -o /dev/null --max-time 5 http://localhost:$PORT_A/"
-# 再アタッチ(既存VMへの wtx up)はメタを書き直すので、sim情報が保持されることを確認する
+# Reattaching with `wtx up` rewrites metadata, so verify that simulator data is preserved.
 META_BEFORE=$(python3 -c "import json; d=json.load(open('$HOME/.wtx/$A.json')); print(d['sim_udid'], d['ports'])" 2>/dev/null)
 $WTX up "$A" "$BASE/a" >/dev/null 2>&1 || fail "wtx up(再アタッチ)"
 META_AFTER=$(python3 -c "import json; d=json.load(open('$HOME/.wtx/$A.json')); print(d['sim_udid'], d['ports'])" 2>/dev/null)

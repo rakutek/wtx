@@ -1,6 +1,6 @@
 [package]
 name = "wtx"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
 authors = ["Raku Sakaguchi <rakutek12@gmail.com>"]
 description = "Worktree X: per-worktree microVMs with isolated Docker runtimes for parallel coding agents"

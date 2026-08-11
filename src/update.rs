@@ -1,6 +1,7 @@
-//! 明示的なリリース確認と、対話TUIだけが使う24時間キャッシュ。
-//! 通常のCLIコマンドはこのモジュールを呼ばず、ネットワークにも触れない。
+//! Explicit release checks and a 24-hour cache used only by the interactive TUI.
+//! Regular CLI commands do not call this module or access the network.
 
+use crate::util::last_nonempty_line;
 use anyhow::{anyhow, Context, Result};
 use reqwest::header::{ACCEPT, ETAG, IF_NONE_MATCH, USER_AGENT};
 use semver::Version;
@@ -15,7 +16,7 @@ const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/rakutek/wtx/relea
 const GITHUB_API_VERSION: &str = "2022-11-28";
 const HOMEBREW_FORMULA: &str = "rakutek/tap/wtx";
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct UpdateStatus {
     pub schema_version: u32,
     pub current_version: String,
@@ -50,7 +51,7 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-fn cache_is_fresh(cache: &UpdateCache, now: u64) -> bool {
+const fn cache_is_fresh(cache: &UpdateCache, now: u64) -> bool {
     cache.schema_version == SCHEMA_VERSION && now.saturating_sub(cache.checked_at) < CACHE_TTL_SECS
 }
 
@@ -104,12 +105,11 @@ fn status_from_cache(cache: &UpdateCache) -> Result<UpdateStatus> {
 
 fn tui_check_disabled() -> bool {
     std::env::var("WTX_NO_UPDATE_CHECK")
-        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-        .unwrap_or(false)
+        .is_ok_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
 }
 
-/// 対話TUI起動時の表示候補と、バックグラウンド更新が必要かを返す。
-/// キャッシュ読み取りだけで、ここではネットワークを使わない。
+/// Return the release candidate shown at interactive TUI startup and whether a background
+/// refresh is needed. This reads only the cache and does not access the network.
 pub fn tui_state() -> (Option<UpdateStatus>, bool) {
     if tui_check_disabled() {
         return (None, false);
@@ -170,7 +170,7 @@ async fn fetch() -> Result<UpdateStatus> {
     Ok(result)
 }
 
-/// 明示CLIとTUIのバックグラウンドスレッドから使う同期境界。
+/// Synchronous boundary shared by the explicit CLI and the TUI background thread.
 pub fn check() -> Result<UpdateStatus> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -218,11 +218,8 @@ fn run_brew_captured(args: &[&str]) -> Result<()> {
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let detail = stderr
-        .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
-        .or_else(|| stdout.lines().rev().find(|line| !line.trim().is_empty()))
+    let detail = last_nonempty_line(&stderr)
+        .or_else(|| last_nonempty_line(&stdout))
         .unwrap_or("Homebrew command failed");
     Err(anyhow!("`{display}` failed: {detail}"))
 }
@@ -244,11 +241,7 @@ fn installed_homebrew_version() -> Result<Version> {
         .with_context(|| format!("run `{display}`; is Homebrew installed?"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let detail = stderr
-            .lines()
-            .rev()
-            .find(|line| !line.trim().is_empty())
-            .unwrap_or("Homebrew could not inspect wtx");
+        let detail = last_nonempty_line(&stderr).unwrap_or("Homebrew could not inspect wtx");
         return Err(anyhow!("`{display}` failed: {detail}"));
     }
     parse_brew_versions(&String::from_utf8_lossy(&output.stdout))
@@ -260,7 +253,8 @@ fn upgrade_with(mut run: impl FnMut(&[&str]) -> Result<()>) -> Result<()> {
     Ok(())
 }
 
-/// Homebrew の自動更新間隔に左右されないよう、formula を明示更新してから wtx だけを更新する。
+/// Update the formula explicitly before upgrading only wtx, independent of Homebrew's
+/// automatic update interval.
 pub fn upgrade() -> Result<()> {
     let result = upgrade_with(|args| {
         if args.first() == Some(&"update") {
@@ -276,7 +270,8 @@ pub fn upgrade() -> Result<()> {
     result
 }
 
-/// alternate screenを壊さないようHomebrewの出力を捕捉し、通知versionまで入ったことを検証する。
+/// Capture Homebrew output to preserve the alternate screen, then verify that the notified
+/// version was installed.
 pub fn upgrade_captured(expected_version: &str) -> Result<()> {
     let expected = parse_version(expected_version)?;
     upgrade_with(run_brew_captured)?;
@@ -336,7 +331,7 @@ mod tests {
     fn upgrade_refreshes_metadata_before_upgrading_only_wtx() {
         let mut calls = Vec::new();
         upgrade_with(|args| {
-            calls.push(args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>());
+            calls.push(args.iter().map(ToString::to_string).collect::<Vec<_>>());
             Ok(())
         })
         .unwrap();

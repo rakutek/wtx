@@ -15,12 +15,13 @@ pub fn lima_dir(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// シェルに渡す文字列を安全にクォートする。
+/// Quote a string safely for a shell.
 pub fn shq(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// 表示幅（全角=2）で右埋めする。`{:<n}` は文字数で数えるため列がずれることがある。
+/// Pad to a display width, counting full-width characters as two columns.
+/// `{:<n}` counts characters and can misalign columns.
 pub fn pad(s: &str, width: usize) -> String {
     let w = unicode_width::UnicodeWidthStr::width(s);
     format!("{s}{}", " ".repeat(width.saturating_sub(w)))
@@ -34,8 +35,13 @@ pub fn limactl(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-/// 出力を継承せずに実行する limactl。TUIのバックグラウンド操作から呼んでも
-/// 画面を汚さない。失敗時は stderr の最後の非空行をエラーとして返す。
+/// Return the last nonblank line of command output.
+pub fn last_nonempty_line(output: &str) -> Option<&str> {
+    output.lines().rev().find(|line| !line.trim().is_empty())
+}
+
+/// Run limactl without inheriting output, keeping background TUI operations off-screen.
+/// On failure, return the last nonblank stderr line as the error.
 pub fn limactl_capture(args: &[&str]) -> std::result::Result<(), String> {
     let out = Command::new("limactl")
         .args(args)
@@ -45,10 +51,7 @@ pub fn limactl_capture(args: &[&str]) -> std::result::Result<(), String> {
         return Ok(());
     }
     let err = String::from_utf8_lossy(&out.stderr);
-    Err(err
-        .lines()
-        .rev()
-        .find(|l| !l.trim().is_empty())
+    Err(last_nonempty_line(&err)
         .unwrap_or("limactl failed")
         .to_string())
 }
@@ -72,11 +75,7 @@ pub fn lima_status_checked(name: &str) -> Result<String> {
         .output()?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        let detail = err
-            .lines()
-            .rev()
-            .find(|line| !line.trim().is_empty())
-            .unwrap_or("limactl list failed");
+        let detail = last_nonempty_line(&err).unwrap_or("limactl list failed");
         return Err(anyhow!("limactl list: {detail}"));
     }
     Ok(String::from_utf8_lossy(&out.stdout)
@@ -132,7 +131,13 @@ mod tests {
 
     #[test]
     fn shell_quote_handles_apostrophes_and_newlines() {
-        assert_eq!(shq("O'Brien"), r#"'O'\''Brien'"#);
+        assert_eq!(shq("O'Brien"), r"'O'\''Brien'");
         assert_eq!(shq("first\nsecond"), "'first\nsecond'");
+    }
+
+    #[test]
+    fn last_nonempty_line_ignores_trailing_blank_lines() {
+        assert_eq!(last_nonempty_line("first\nlast\n  \n"), Some("last"));
+        assert_eq!(last_nonempty_line("\n  \n"), None);
     }
 }

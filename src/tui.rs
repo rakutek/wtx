@@ -1,7 +1,7 @@
-//! ratatui コンソール: VMをプロジェクト（ホスト側リポジトリ）ごとにまとめて表示し、
-//! 起動/停止・削除・シェル起動・wtxのupgradeを1画面で操作する。
-//! 時間のかかる処理（limactl start/stop/delete、upgrade、状態の取得）はバックグラウンド
-//! スレッドで実行し、UIは操作中も止まらない。
+//! A ratatui console that groups VMs by project (host repository) and provides start, stop,
+//! delete, shell, and wtx upgrade actions in one screen. Slow operations such as limactl
+//! start/stop/delete, upgrades, and state collection run in background threads so the UI
+//! remains responsive.
 use crate::lima::{self, Instance};
 use crate::mirror;
 use crate::update::UpdateStatus;
@@ -14,10 +14,11 @@ use crossterm::terminal::{
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::Write as _;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
-/// プロジェクト見出しか、その配下のVMか。
+/// A project heading or one of its VMs.
 enum Row {
     Group {
         key: String,
@@ -27,13 +28,13 @@ enum Row {
     Vm(Instance),
 }
 
-/// 誤操作を避けるため確認が必要な操作。
+/// An action requiring confirmation to prevent accidental execution.
 enum Confirm {
     Delete(String),
     Upgrade(String),
 }
 
-/// バックグラウンドスレッドからUIへの通知。
+/// A notification from a background thread to the UI.
 enum Msg {
     Refreshed {
         instances: Vec<Instance>,
@@ -52,7 +53,8 @@ enum Msg {
     },
 }
 
-// 列幅。ヘッダー行の先頭4桁 = 枠(1) + 選択記号(1) + VM行の字下げ(2) に合わせてある。
+// Column widths. The first four columns align with the border (1), selection marker (1),
+// and VM-row indentation (2).
 const W_NAME: usize = 24;
 const W_STATUS: usize = 14;
 const W_BRANCH: usize = 16;
@@ -70,25 +72,26 @@ struct App {
     state: ListState,
     status: String,
     status_err: bool,
-    /// 確認中の操作。押下時に対象を固定し、確認中に状態が変わっても対象は変わらない。
+    /// Pending confirmation. Capture the target on keypress so state changes cannot alter it.
     confirm: Option<Confirm>,
     mirror_line: String,
     last_refresh: Instant,
-    /// worktree専用シミュレータの状態（UDID → Booted/Shutdown）。sim を使うVMが無ければ空。
+    /// Worktree simulator states (UDID -> Booted/Shutdown), empty when no VM uses a simulator.
     sim_states: BTreeMap<String, String>,
-    /// 実行中の操作（VM名 → (verb, 開始時刻)）。対象VMへの二重操作を防ぐ。
+    /// Active operations (VM name -> (verb, start time)), used to prevent duplicate actions.
     in_flight: HashMap<String, (&'static str, Instant)>,
     refreshing: bool,
     update_available: Option<UpdateStatus>,
-    /// upgrade先versionと開始時刻。二重実行と実行中の終了を防ぐ。
+    /// Target upgrade version and start time, used to prevent duplicate runs and early exit.
     upgrading: Option<(String, Instant)>,
     tx: Sender<Msg>,
 }
 
-/// VM一覧・sim状態・ミラー行をまとめて取得する（サブプロセス呼び出しを含むため遅い）。
+/// Collect the VM list, simulator states, and mirror row. This is slow because it invokes
+/// subprocesses.
 fn fetch_state() -> (Vec<Instance>, BTreeMap<String, String>, String) {
     let instances = lima::list_instances();
-    // sim を使うVMがあるときだけ simctl に問い合わせる（xcrun 無し環境を巻き込まない）
+    // Query simctl only when a VM uses a simulator, avoiding xcrun on unsupported systems.
     let sim_states = crate::sim::states_for(
         &instances
             .iter()
@@ -121,7 +124,7 @@ fn fetch_state() -> (Vec<Instance>, BTreeMap<String, String>, String) {
 
 impl App {
     fn new(tx: Sender<Msg>, update_available: Option<UpdateStatus>) -> Self {
-        let mut a = App {
+        let mut a = Self {
             instances: vec![],
             rows: vec![],
             collapsed: HashSet::new(),
@@ -138,7 +141,8 @@ impl App {
             upgrading: None,
             tx,
         };
-        // 初回だけ同期で取得し、最初のフレームから中身を出す（--snapshot もこれに依存）
+        // Collect synchronously only at startup so the first frame is populated. `--snapshot`
+        // also relies on this behavior.
         let (i, s, m) = fetch_state();
         a.apply(i, s, m);
         if a.state.selected().is_none() && !a.rows.is_empty() {
@@ -160,8 +164,8 @@ impl App {
         self.rebuild_rows();
     }
 
-    /// instances から表示行を組み立てる。選択は行番号でなく「何を選んでいたか」で
-    /// 復元する（バックグラウンド更新で行がずれてもカーソルが飛ばない）。
+    /// Build display rows from instances. Restore selection by item identity rather than row
+    /// number so background refreshes cannot make the cursor jump to another item.
     fn rebuild_rows(&mut self) {
         let prev = self.selected_key();
         let mut groups: BTreeMap<String, Vec<Instance>> = BTreeMap::new();
@@ -193,13 +197,12 @@ impl App {
                 _ => false,
             })
         });
-        match idx {
-            Some(i) => self.state.select(Some(i)),
-            None => {
-                let cur = self.state.selected().unwrap_or(0);
-                self.state
-                    .select(self.rows.len().checked_sub(1).map(|last| cur.min(last)));
-            }
+        if let Some(i) = idx {
+            self.state.select(Some(i));
+        } else {
+            let cur = self.state.selected().unwrap_or(0);
+            self.state
+                .select(self.rows.len().checked_sub(1).map(|last| cur.min(last)));
         }
     }
 
@@ -225,12 +228,16 @@ impl App {
         if self.rows.is_empty() {
             return;
         }
-        let i = self.state.selected().unwrap_or(0) as isize + delta;
-        let i = i.clamp(0, self.rows.len() as isize - 1) as usize;
+        let i = self
+            .state
+            .selected()
+            .unwrap_or(0)
+            .saturating_add_signed(delta)
+            .min(self.rows.len() - 1);
         self.state.select(Some(i));
     }
 
-    /// 見出し行なら開閉する。VM行なら false を返す。
+    /// Toggle a heading row. Return false for a VM row.
     fn toggle_group(&mut self) -> bool {
         let Some(Row::Group { key, .. }) = self.selected_row() else {
             return false;
@@ -259,7 +266,7 @@ impl App {
         });
     }
 
-    /// start/stop/delete をバックグラウンドで実行する。終了を待たずにUIへ戻る。
+    /// Run start, stop, or delete in the background and return to the UI immediately.
     fn spawn_op(&mut self, name: String, verb: &'static str) {
         self.in_flight.insert(name.clone(), (verb, Instant::now()));
         self.set_status(format!("{verb} {name} …"), false);
@@ -289,7 +296,8 @@ impl App {
         self.confirm = Some(Confirm::Upgrade(update.latest_version.clone()));
     }
 
-    /// Homebrewの出力を捕捉してupgradeし、alternate screenを壊さずUIへ結果を返す。
+    /// Capture Homebrew output during upgrade to preserve the alternate screen and return the
+    /// result to the UI.
     fn spawn_upgrade(&mut self, version: String) {
         self.upgrading = Some((version.clone(), Instant::now()));
         self.set_status(format!("upgrading wtx to v{version} …"), false);
@@ -309,7 +317,7 @@ impl App {
         self.in_flight.contains_key(name)
     }
 
-    /// need_clear: 子プロセスが画面に書いた行を次フレームで消したいとき true。
+    /// `need_clear` is true when the next frame should erase output written by a child process.
     fn handle(&mut self, m: Msg, need_clear: &mut bool) {
         match m {
             Msg::Refreshed {
@@ -350,7 +358,7 @@ impl App {
     }
 }
 
-/// tty のない環境でも描画を確認できるスナップショット（CI・動作確認用）。
+/// Render a snapshot without a TTY for CI and manual verification.
 pub fn snapshot() -> Result<()> {
     let mut term = Terminal::new(ratatui::backend::TestBackend::new(100, 18))?;
     let (tx, _rx) = mpsc::channel();
@@ -400,7 +408,8 @@ fn event_loop<B: Backend + std::io::Write>(term: &mut Terminal<B>) -> Result<()>
         }
         term.draw(|f| draw(f, &mut app))?;
 
-        // 150ms 刻み: スピナーを回しつつキー入力を待つ。タイムアウト時は定期更新のみ。
+        // Poll in 150 ms increments to animate spinners while waiting for input. On timeout,
+        // perform only the periodic refresh.
         if !event::poll(Duration::from_millis(150))? {
             if app.last_refresh.elapsed() > Duration::from_secs(5) {
                 app.spawn_refresh();
@@ -414,7 +423,7 @@ fn event_loop<B: Backend + std::io::Write>(term: &mut Terminal<B>) -> Result<()>
             continue;
         }
 
-        // 確認モーダル: 押下時に固定した対象に対してだけ働く
+        // The confirmation modal acts only on the target captured when the key was pressed.
         if let Some(confirm) = app.confirm.take() {
             match (confirm, k.code) {
                 (Confirm::Delete(name), KeyCode::Char('y')) => app.spawn_op(name, "delete"),
@@ -445,7 +454,7 @@ fn event_loop<B: Backend + std::io::Write>(term: &mut Terminal<B>) -> Result<()>
             }
             KeyCode::Char('d') => match app.selected_vm().map(|i| i.name.clone()) {
                 Some(name) if app.busy(&name) => {
-                    app.set_status(format!("{name}: operation in progress"), false)
+                    app.set_status(format!("{name}: operation in progress"), false);
                 }
                 Some(name) => app.confirm = Some(Confirm::Delete(name)),
                 None => app.set_status("select a VM first".into(), false),
@@ -453,7 +462,7 @@ fn event_loop<B: Backend + std::io::Write>(term: &mut Terminal<B>) -> Result<()>
             KeyCode::Char('u') => app.prompt_upgrade(),
             KeyCode::Char('s') => match app.selected_vm().cloned() {
                 Some(i) if app.busy(&i.name) => {
-                    app.set_status(format!("{}: operation in progress", i.name), false)
+                    app.set_status(format!("{}: operation in progress", i.name), false);
                 }
                 Some(i) => {
                     let verb = if i.status == "Running" {
@@ -483,7 +492,7 @@ fn event_loop<B: Backend + std::io::Write>(term: &mut Terminal<B>) -> Result<()>
                     );
                     continue;
                 }
-                // TUI を一旦畳んで対話シェルに入る
+                // Temporarily suspend the TUI while entering an interactive shell.
                 disable_raw_mode()?;
                 execute!(term.backend_mut(), LeaveAlternateScreen)?;
                 let r = crate::sshx::shell(&i.name);
@@ -491,7 +500,7 @@ fn event_loop<B: Backend + std::io::Write>(term: &mut Terminal<B>) -> Result<()>
                 execute!(term.backend_mut(), EnterAlternateScreen)?;
                 term.clear()?;
                 match r {
-                    Ok(_) => app.set_status(format!("left the shell on {}", i.name), false),
+                    Ok(()) => app.set_status(format!("left the shell on {}", i.name), false),
                     Err(e) => app.set_status(format!("shell: {e}"), true),
                 }
                 app.spawn_refresh();
@@ -503,12 +512,12 @@ fn event_loop<B: Backend + std::io::Write>(term: &mut Terminal<B>) -> Result<()>
 
 fn draw(f: &mut Frame, app: &mut App) {
     let chunks = Layout::vertical([
-        Constraint::Length(1), // タイトル
-        Constraint::Length(1), // 列ヘッダー
-        Constraint::Min(5),    // VM一覧
-        Constraint::Length(6), // 詳細
-        Constraint::Length(1), // ステータス（操作結果）
-        Constraint::Length(1), // キー操作ヘルプ（常設）
+        Constraint::Length(1), // Title
+        Constraint::Length(1), // Column headers
+        Constraint::Min(5),    // VM list
+        Constraint::Length(6), // Details
+        Constraint::Length(1), // Status and operation results
+        Constraint::Length(1), // Persistent key help
     ])
     .split(f.area());
 
@@ -592,15 +601,15 @@ fn draw(f: &mut Frame, app: &mut App) {
                 let st = app
                     .sim_states
                     .get(&i.sim_udid)
-                    .map(String::as_str)
-                    .unwrap_or("missing");
-                d.push_str(&format!("\nsim     : {} ({st})", i.sim_udid));
+                    .map_or("missing", String::as_str);
+                let _ = write!(d, "\nsim     : {} ({st})", i.sim_udid);
             }
             if let Some((verb, since)) = app.in_flight.get(&i.name) {
-                d.push_str(&format!(
+                let _ = write!(
+                    d,
                     "\nop      : {verb} in progress ({}s)",
                     since.elapsed().as_secs()
-                ));
+                );
             }
             if i.orphaned {
                 d.push_str(
@@ -614,8 +623,7 @@ fn draw(f: &mut Frame, app: &mut App) {
                 format!("VMs not tied to a repository: {vms} ({running} running)")
             } else {
                 format!(
-                    "project : {}\nVMs     : {vms} ({running} running)\nnew VM  : wtx up <name> <worktree>",
-                    key
+                    "project : {key}\nVMs     : {vms} ({running} running)\nnew VM  : wtx up <name> <worktree>"
                 )
             }
         }
@@ -760,8 +768,7 @@ fn render_row<'a>(app: &App, row: &'a Row) -> ListItem<'a> {
                 let st = app
                     .sim_states
                     .get(&i.sim_udid)
-                    .map(String::as_str)
-                    .unwrap_or("missing");
+                    .map_or("missing", String::as_str);
                 let c = match st {
                     "Booted" => Color::Green,
                     "Shutdown" => Color::DarkGray,
@@ -780,7 +787,8 @@ fn render_row<'a>(app: &App, row: &'a Row) -> ListItem<'a> {
     }
 }
 
-/// 表示幅（全角=2）で width にそろえる。収まらなければ … で切り詰める。
+/// Fit text to a display width, counting full-width characters as two columns and truncating
+/// with `…` when needed.
 fn fit(s: &str, width: usize) -> String {
     use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
     let w = UnicodeWidthStr::width(s);
@@ -801,10 +809,10 @@ fn fit(s: &str, width: usize) -> String {
 }
 
 fn compact_path(p: &str) -> String {
-    match dirs::home_dir() {
-        Some(h) => p.replacen(&h.to_string_lossy().to_string(), "~", 1),
-        None => p.to_string(),
-    }
+    dirs::home_dir().map_or_else(
+        || p.to_string(),
+        |home| p.replacen(home.to_string_lossy().as_ref(), "~", 1),
+    )
 }
 
 fn centered(w: u16, h: u16, area: Rect) -> Rect {

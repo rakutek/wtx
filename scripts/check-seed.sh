@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# wtx up --from(環境の引き継ぎ)を実VMで通しで検証する。
+# Verify `wtx up --from` environment seeding end to end with real VMs.
 #
-# 同一メインリポジトリの worktree 2本を使い、volume の付け替え・イメージ引き継ぎ・
-# 共有 git の非干渉(新VMのコミットが自分のブランチにだけ乗る)を確認する。
-#   使い方: scripts/check-seed.sh   (VMを2台作って消すので数分かかる)
+# Use two worktrees from one main repository to verify volume renaming, image inheritance,
+# and shared-Git isolation: commits from the new VM advance only its own branch.
+# Usage: scripts/check-seed.sh
 set -u
 WTX=${WTX:-$(command -v wtx 2>/dev/null || echo "$(cd "$(dirname "$0")/.." && pwd)/target/release/wtx")}
 REPO=${WTX_SEED_REPO:-$HOME/wtxseed}
-A=$(basename "$REPO")-a   # VM名 = worktree ディレクトリ名(compose プロジェクト名の検証のため)
+A=$(basename "$REPO")-a   # Match the VM name to the worktree directory to test the Compose project name.
 B=$(basename "$REPO")-b
 FAILED=0
 pass() { echo "PASS  $1"; }
