@@ -13,6 +13,7 @@ mod util;
 
 use anyhow::{anyhow, Result};
 use clap::{CommandFactory, Parser, Subcommand};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 #[derive(Parser)]
@@ -72,6 +73,50 @@ impl UpFlags {
     }
 }
 
+/// オーケストレータの所有情報。wtx は task 状態を管理せず、cleanup 用の来歴だけを保持する。
+#[derive(clap::Args, Default)]
+struct OwnerFlags {
+    /// Owning orchestrator or actor, e.g. orca, herdr, manual
+    #[arg(long)]
+    owner: Option<String>,
+    /// Owner-scoped provenance label KEY=VALUE (repeatable)
+    #[arg(long = "owner-label", value_name = "KEY=VALUE")]
+    labels: Vec<String>,
+}
+
+impl OwnerFlags {
+    fn into_owner(self) -> Result<Option<lima::OwnerMeta>> {
+        let Some(kind) = self.owner else {
+            if self.labels.is_empty() {
+                return Ok(None);
+            }
+            return Err(anyhow!("--owner-label requires --owner"));
+        };
+        let kind = kind.trim();
+        if kind.is_empty() {
+            return Err(anyhow!("--owner must not be empty"));
+        }
+        let mut labels = BTreeMap::new();
+        for raw in self.labels {
+            let (key, value) = raw
+                .split_once('=')
+                .ok_or_else(|| anyhow!("owner label must be KEY=VALUE: {raw}"))?;
+            if key.is_empty() || value.is_empty() {
+                return Err(anyhow!(
+                    "owner label must have a non-empty key and value: {raw}"
+                ));
+            }
+            if labels.insert(key.to_string(), value.to_string()).is_some() {
+                return Err(anyhow!("duplicate owner label: {key}"));
+            }
+        }
+        Ok(Some(lima::OwnerMeta {
+            kind: kind.to_string(),
+            labels,
+        }))
+    }
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Create and start a VM (the host git is shared: commits in the VM land on the host)
@@ -85,6 +130,34 @@ enum Cmd {
         mounts: Vec<String>,
         #[command(flatten)]
         flags: UpFlags,
+    },
+    /// Idempotently create or start a VM and wait until dockerd is ready
+    Ensure {
+        /// VM name, or a directory (a single argument containing `/` counts as DIR).
+        /// Omit both to resolve from the current directory
+        name: Option<String>,
+        /// Worktree directory (default: the VM's recorded workdir, else the current directory)
+        workdir: Option<String>,
+        /// Extra mounts used only when the VM is first created (append :ro for read-only)
+        mounts: Vec<String>,
+        #[command(flatten)]
+        flags: UpFlags,
+        #[command(flatten)]
+        owner: OwnerFlags,
+        /// Seconds to wait for dockerd after the VM starts
+        #[arg(long, default_value_t = 120)]
+        timeout_seconds: u64,
+        /// Machine-readable versioned receipt
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect one wtx VM, its worktree, runtime readiness, ports, simulator, and owner
+    Inspect {
+        /// VM name (omit inside a worktree covered by a wtx VM)
+        name: Option<String>,
+        /// Machine-readable versioned receipt
+        #[arg(long)]
+        json: bool,
     },
     /// Create a git worktree and its VM in one step (the branch is created if missing)
     New {
@@ -101,6 +174,9 @@ enum Cmd {
         name: String,
         #[arg(short = 'w', long)]
         workdir: Option<String>,
+        /// Allocate a remote PTY for interactive agent CLIs
+        #[arg(short = 't', long)]
+        tty: bool,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         cmd: Vec<String>,
     },
@@ -218,10 +294,35 @@ fn run() -> Result<()> {
             let (name, workdir) = up_target(name, workdir)?;
             lima::up(&name, &workdir, flags.into_opts(mounts))
         }
+        Some(Cmd::Ensure {
+            name,
+            workdir,
+            mounts,
+            flags,
+            owner,
+            timeout_seconds,
+            json,
+        }) => {
+            let (name, workdir) = up_target(name, workdir)?;
+            lima::ensure(
+                &name,
+                &workdir,
+                flags.into_opts(mounts),
+                owner.into_owner()?,
+                timeout_seconds,
+                json,
+            )
+        }
+        Some(Cmd::Inspect { name, json }) => lima::inspect(name.as_deref(), json),
         Some(Cmd::New { branch, dir, flags }) => {
             lima::new(&branch, dir.as_deref(), flags.into_opts(vec![]))
         }
-        Some(Cmd::Exec { name, workdir, cmd }) => sshx::exec(&name, workdir.as_deref(), &cmd),
+        Some(Cmd::Exec {
+            name,
+            workdir,
+            tty,
+            cmd,
+        }) => sshx::exec(&name, workdir.as_deref(), &cmd, tty),
         Some(Cmd::Shell { name }) => sshx::shell(&name),
         Some(Cmd::Ls { json }) => {
             if json {
@@ -325,6 +426,80 @@ fn up_target(name: Option<String>, workdir: Option<String>) -> Result<(String, S
                         .join(", ")
                 )),
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exec_tty_is_parsed_without_becoming_remote_argv() {
+        let cli = Cli::try_parse_from(["wtx", "exec", "--tty", "vm-a", "codex"]).unwrap();
+        match cli.cmd.unwrap() {
+            Cmd::Exec { name, tty, cmd, .. } => {
+                assert_eq!(name, "vm-a");
+                assert!(tty);
+                assert_eq!(cmd, ["codex"]);
+            }
+            _ => panic!("expected exec"),
+        }
+    }
+
+    #[test]
+    fn owner_labels_are_structured_and_sorted() {
+        let owner = OwnerFlags {
+            owner: Some("orca".into()),
+            labels: vec!["task_id=task_1".into(), "run_id=run_1".into()],
+        }
+        .into_owner()
+        .unwrap()
+        .unwrap();
+        assert_eq!(owner.kind, "orca");
+        assert_eq!(owner.labels.get("run_id").unwrap(), "run_1");
+        assert_eq!(owner.labels.get("task_id").unwrap(), "task_1");
+    }
+
+    #[test]
+    fn owner_label_requires_owner() {
+        let err = OwnerFlags {
+            owner: None,
+            labels: vec!["run_id=run_1".into()],
+        }
+        .into_owner()
+        .unwrap_err();
+        assert!(err.to_string().contains("requires --owner"));
+    }
+
+    #[test]
+    fn ensure_machine_contract_is_parsed() {
+        let cli = Cli::try_parse_from([
+            "wtx",
+            "ensure",
+            "vm-a",
+            "/tmp/worktree-a",
+            "--owner",
+            "orca",
+            "--owner-label",
+            "run_id=run_1",
+            "--json",
+        ])
+        .unwrap();
+        match cli.cmd.unwrap() {
+            Cmd::Ensure {
+                name,
+                workdir,
+                owner,
+                json,
+                ..
+            } => {
+                assert_eq!(name.as_deref(), Some("vm-a"));
+                assert_eq!(workdir.as_deref(), Some("/tmp/worktree-a"));
+                assert_eq!(owner.owner.as_deref(), Some("orca"));
+                assert!(json);
+            }
+            _ => panic!("expected ensure"),
         }
     }
 }

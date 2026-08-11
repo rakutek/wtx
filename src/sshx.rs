@@ -2,6 +2,7 @@ use crate::util::{lima_dir, shq, wtx_home};
 use anyhow::{anyhow, Result};
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// Lima の control master を迂回した接続引数。
 /// provision の `usermod -aG docker` は master 確立後の既存セッションに効かないため、
@@ -22,16 +23,28 @@ fn ssh_base(name: &str) -> Vec<String> {
 
 /// VM 内の bash に stdin 経由でスクリプトを流す（クォート事故が起きない）。
 pub fn vm_script(name: &str, script: &str, extra_stdin: Option<&[u8]>) -> Result<()> {
+    vm_script_with_output(name, script, extra_stdin, true)
+}
+
+/// JSON receipt を壊さないよう、必要な呼び出しではリモート stdout を抑止できる。
+pub fn vm_script_with_output(
+    name: &str,
+    script: &str,
+    extra_stdin: Option<&[u8]>,
+    inherit_stdout: bool,
+) -> Result<()> {
     let mut args = ssh_base(name);
     args.push(format!("lima-{name}"));
     args.push("--".into());
     args.push("bash".into());
     args.push("-s".into());
 
-    let mut child = Command::new("ssh")
-        .args(&args)
-        .stdin(Stdio::piped())
-        .spawn()?;
+    let mut command = Command::new("ssh");
+    command.args(&args).stdin(Stdio::piped());
+    if !inherit_stdout {
+        command.stdout(Stdio::null());
+    }
+    let mut child = command.spawn()?;
     {
         let stdin = child.stdin.as_mut().ok_or_else(|| anyhow!("no stdin"))?;
         stdin.write_all(script.as_bytes())?;
@@ -68,18 +81,48 @@ pub fn capture(name: &str, remote: &str) -> Result<String> {
 }
 
 /// VM 内でコマンドを実行する。終了コードはそのまま素通しする（オーケストレータ連携の契約）。
-pub fn exec(name: &str, workdir: Option<&str>, cmd: &[String]) -> Result<()> {
+/// tty=true では ssh に PTY を強制割り当てし、Codex/Claude 等の対話TUIをそのまま接続する。
+pub fn exec(name: &str, workdir: Option<&str>, cmd: &[String], tty: bool) -> Result<()> {
     let quoted: Vec<String> = cmd.iter().map(|s| shq(s)).collect();
     let mut remote = quoted.join(" ");
     if let Some(d) = workdir {
         remote = format!("cd {} && {}", shq(d), remote);
     }
     let mut args = ssh_base(name);
+    if tty {
+        // -tt は、wtx 自身が別のPTYランナーから起動された場合にも割り当てを強制する。
+        // ssh が window resize と signal を中継するため、独自PTY実装は持たない。
+        args.push("-tt".into());
+    }
     args.push(format!("lima-{name}"));
     args.push("--".into());
     args.push(remote);
     let st = Command::new("ssh").args(&args).status()?;
     std::process::exit(st.code().unwrap_or(1));
+}
+
+/// dockerd がコマンドを受け付けられるかを副作用なしで確認する。
+pub fn docker_ready(name: &str) -> bool {
+    capture(name, "docker info >/dev/null 2>&1 && printf '%s' ready")
+        .map(|out| out == "ready")
+        .unwrap_or(false)
+}
+
+/// 起動直後のVMで dockerd ready を待つ。タイムアウトはオーケストレータ側で調整可能。
+pub fn wait_docker_ready(name: &str, timeout: Duration) -> Result<()> {
+    let started = Instant::now();
+    loop {
+        if docker_ready(name) {
+            return Ok(());
+        }
+        if started.elapsed() >= timeout {
+            return Err(anyhow!(
+                "timed out after {}s waiting for docker in {name}",
+                timeout.as_secs()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
 }
 
 pub fn shell(name: &str) -> Result<()> {

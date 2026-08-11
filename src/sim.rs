@@ -215,9 +215,20 @@ pub fn states_for(udids: &[String]) -> BTreeMap<String, String> {
 
 /// デバイスが未作成（または消失）なら作る（冪等）。meta の保存は呼び出し側が行う。
 pub fn ensure_device(name: &str, meta: &mut InstanceMeta, device: Option<&str>) -> Result<()> {
+    ensure_device_with_output(name, meta, device, true)
+}
+
+pub fn ensure_device_with_output(
+    name: &str,
+    meta: &mut InstanceMeta,
+    device: Option<&str>,
+    print_progress: bool,
+) -> Result<()> {
     if !meta.sim_udid.is_empty() {
         if device_state(&meta.sim_udid)?.is_some() {
-            println!("simulator ready: wtx-{name} ({})", meta.sim_udid);
+            if print_progress {
+                println!("simulator ready: wtx-{name} ({})", meta.sim_udid);
+            }
             return Ok(());
         }
         eprintln!(
@@ -236,17 +247,25 @@ pub fn ensure_device(name: &str, meta: &mut InstanceMeta, device: Option<&str>) 
     let udid = out.lines().last().unwrap_or_default().trim().to_string();
     meta.sim_udid = udid.clone();
     meta.sim_devicetype = dt_name.clone();
-    println!("created simulator wtx-{name} ({dt_name}, {udid})");
+    if print_progress {
+        println!("created simulator wtx-{name} ({dt_name}, {udid})");
+    }
     Ok(())
 }
 
 /// `wtx up --from` 用: clone 元のデバイスを複製する（インストール済みアプリ・データごと）。
 /// simctl clone は Shutdown が必須（実測: Booted は SimError 405）なので、
 /// VM clone と同じく「止めて写して戻す」。
-pub fn clone_device(src_udid: &str, new_vm: &str) -> Result<String> {
+pub fn clone_device_with_output(
+    src_udid: &str,
+    new_vm: &str,
+    print_progress: bool,
+) -> Result<String> {
     let was_booted = matches!(device_state(src_udid)?, Some((s, _)) if s == "Booted");
     if was_booted {
-        println!("shutting down the source simulator for a consistent copy...");
+        if print_progress {
+            println!("shutting down the source simulator for a consistent copy...");
+        }
         let _ = xcrun(&["simctl", "shutdown", src_udid]);
     }
     let out = xcrun(&["simctl", "clone", src_udid, &format!("wtx-{new_vm}")])?;
@@ -254,7 +273,9 @@ pub fn clone_device(src_udid: &str, new_vm: &str) -> Result<String> {
     if was_booted {
         let _ = xcrun(&["simctl", "boot", src_udid]); // 復帰はバックグラウンドで進む
     }
-    println!("cloned simulator -> wtx-{new_vm} ({udid})");
+    if print_progress {
+        println!("cloned simulator -> wtx-{new_vm} ({udid})");
+    }
     Ok(udid)
 }
 

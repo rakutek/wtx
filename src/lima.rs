@@ -3,7 +3,9 @@ use crate::repo::{self, RepoKind};
 use crate::util::*;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 pub const GOLDEN: &str = "wtx-golden";
 const TEMPLATE: &str = include_str!("../templates/vm.yaml.tmpl");
@@ -33,12 +35,82 @@ pub struct InstanceMeta {
     /// `wtx sim wire` の割り当て（label → host/guest）。`sim env` が再armに使う
     #[serde(default)]
     pub ports: std::collections::BTreeMap<String, PortMap>,
+    /// task 状態は持たず、外部オーケストレータがcleanupに使う所有来歴だけを記録する。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<OwnerMeta>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OwnerMeta {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortMap {
     pub host: u16,
     pub guest: u16,
+}
+
+pub const RECEIPT_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Serialize)]
+struct WorktreeInspection {
+    path: String,
+    repo: String,
+    branch: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    head: String,
+    orphaned: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeInspection {
+    docker: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct PortInspection {
+    host: u16,
+    guest: u16,
+    forward_alive: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct SimulatorInspection {
+    udid: String,
+    device_type: String,
+    state: String,
+}
+
+#[derive(Debug, Serialize)]
+struct InstanceInspection {
+    name: String,
+    status: String,
+    ready: bool,
+    runtime: RuntimeInspection,
+    worktree: WorktreeInspection,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    seeded_from: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner: Option<OwnerMeta>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    simulator: Option<SimulatorInspection>,
+    ports: BTreeMap<String, PortInspection>,
+}
+
+#[derive(Debug, Serialize)]
+struct InspectReceipt {
+    schema_version: u32,
+    instance: InstanceInspection,
+}
+
+#[derive(Debug, Serialize)]
+struct EnsureReceipt {
+    schema_version: u32,
+    action: &'static str,
+    instance: InstanceInspection,
 }
 
 pub fn meta_path(name: &str) -> PathBuf {
@@ -64,6 +136,14 @@ pub struct UpOpts {
     pub extra_mounts: Vec<String>,
     pub sim: bool,
     pub sim_device: Option<String>,
+}
+
+fn up_limactl(args: &[&str], quiet: bool) -> Result<()> {
+    if quiet {
+        limactl_capture(args).map_err(|e| anyhow!("limactl {}: {e}", args.join(" ")))
+    } else {
+        limactl(args)
+    }
 }
 
 fn render_yaml(mounts: &[Mount], cpus: u32, memory: &str, disk: &str, path: &Path) -> Result<()> {
@@ -182,7 +262,7 @@ fn compose_project_name(dir: &Path) -> String {
 /// 隔離gitの除去は旧バージョンのwtxが作ったVMからの移行措置:
 /// clone 元に .wtx-local オーバーレイが残っていると、新VMの git が clone 元の
 /// VMローカル git を黙って使い続けてしまうため、剥がせない場合だけ失敗させる。
-fn seed_cleanup(name: &str, src: &str, workdir: &Path) -> Result<()> {
+fn seed_cleanup(name: &str, src: &str, workdir: &Path, quiet: bool) -> Result<()> {
     let src_meta = load_meta(src);
     let old_gitdir = src_meta
         .as_ref()
@@ -257,10 +337,16 @@ fi
         src = shq(&src_project),
         dst = shq(&dst_project),
     );
-    crate::sshx::vm_script(name, &script, None)
+    crate::sshx::vm_script_with_output(name, &script, None, !quiet)
 }
 
 pub fn up(name: &str, workdir: &str, o: UpOpts) -> Result<()> {
+    up_inner(name, workdir, o, false)?;
+    println!("ready:\n  wtx shell {name}\n  wtx rm {name}");
+    Ok(())
+}
+
+fn up_inner(name: &str, workdir: &str, o: UpOpts, quiet: bool) -> Result<()> {
     let workdir = std::fs::canonicalize(workdir)?;
     if !workdir.is_dir() {
         return Err(anyhow!("workdir not found: {}", workdir.display()));
@@ -345,11 +431,13 @@ pub fn up(name: &str, workdir: &str, o: UpOpts) -> Result<()> {
         }
         let was_running = src_status == "Running";
         if was_running {
-            println!("stopping {src} for a consistent copy (it restarts in the background)...");
-            limactl(&["stop", src])?;
+            if !quiet {
+                println!("stopping {src} for a consistent copy (it restarts in the background)...");
+            }
+            up_limactl(&["stop", src], quiet)?;
         }
         let args = clone_args(src, name, &o, &mounts);
-        limactl(&args.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
+        up_limactl(&args.iter().map(|s| s.as_str()).collect::<Vec<_>>(), quiet)?;
         if was_running {
             // 新VMの起動と並行して clone 元を復帰させ、ダウンタイムを clone の間だけにする
             let _ = std::process::Command::new("limactl")
@@ -358,28 +446,31 @@ pub fn up(name: &str, workdir: &str, o: UpOpts) -> Result<()> {
                 .stderr(std::process::Stdio::null())
                 .spawn();
         }
-        limactl(&["start", name, "--tty=false"])?;
-        seed_cleanup(name, src, &workdir)?;
+        up_limactl(&["start", name, "--tty=false"], quiet)?;
+        seed_cleanup(name, src, &workdir, quiet)?;
     } else if !status.is_empty() {
         // 既存インスタンスへの再アタッチ（マウント構成は作成時のもの）
         if status != "Running" {
-            limactl(&["start", name, "--tty=false"])?;
+            up_limactl(&["start", name, "--tty=false"], quiet)?;
         }
     } else if !o.no_clone && golden_usable() {
         let args = clone_args(GOLDEN, name, &o, &mounts);
-        limactl(&args.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
-        limactl(&["start", name, "--tty=false"])?;
+        up_limactl(&args.iter().map(|s| s.as_str()).collect::<Vec<_>>(), quiet)?;
+        up_limactl(&["start", name, "--tty=false"], quiet)?;
     } else {
         if !o.no_clone {
             eprintln!("wtx: hint: `wtx image build` makes later VM creation take seconds");
         }
-        limactl(&[
-            "start",
-            "--name",
-            name,
-            "--tty=false",
-            &yaml.to_string_lossy(),
-        ])?;
+        up_limactl(
+            &[
+                "start",
+                "--name",
+                name,
+                "--tty=false",
+                &yaml.to_string_lossy(),
+            ],
+            quiet,
+        )?;
     }
 
     // 再アタッチではシミュレータ・ポート割り当てを引き継ぐ（メタは毎回書き直すため）。
@@ -390,6 +481,7 @@ pub fn up(name: &str, workdir: &str, o: UpOpts) -> Result<()> {
         sim_udid: prev.sim_udid,
         sim_devicetype: prev.sim_devicetype,
         ports: prev.ports,
+        owner: prev.owner,
         ..Default::default()
     };
     if let Some(r) = &repo {
@@ -435,7 +527,7 @@ if [ ! -L "$HOME/.claude" ]; then rm -rf "$HOME/.claude"; ln -s "$H" "$HOME/.cla
     if meta.sim_udid.is_empty() {
         if let Some(src_meta) = o.from.as_deref().and_then(load_meta) {
             if !src_meta.sim_udid.is_empty() {
-                match crate::sim::clone_device(&src_meta.sim_udid, name) {
+                match crate::sim::clone_device_with_output(&src_meta.sim_udid, name, !quiet) {
                     Ok(udid) => {
                         meta.sim_udid = udid;
                         meta.sim_devicetype = src_meta.sim_devicetype.clone();
@@ -447,13 +539,202 @@ if [ ! -L "$HOME/.claude" ]; then rm -rf "$HOME/.claude"; ln -s "$H" "$HOME/.cla
         }
     }
     if o.sim || o.sim_device.is_some() {
-        if let Err(e) = crate::sim::ensure_device(name, &mut meta, o.sim_device.as_deref()) {
+        if let Err(e) =
+            crate::sim::ensure_device_with_output(name, &mut meta, o.sim_device.as_deref(), !quiet)
+        {
             eprintln!("wtx: warning: simulator not created: {e}");
         }
     }
     save_meta(name, &meta)?;
+    Ok(())
+}
 
-    println!("ready:\n  wtx shell {name}\n  wtx rm {name}");
+/// オーケストレータ向けの冪等なVM準備。既存VMでは作成時専用の --from を再適用せず、
+/// 記録済みのseedと要求が一致することだけを検証する。
+pub fn ensure(
+    name: &str,
+    workdir: &str,
+    mut o: UpOpts,
+    owner: Option<OwnerMeta>,
+    timeout_seconds: u64,
+    json: bool,
+) -> Result<()> {
+    if timeout_seconds == 0 {
+        return Err(anyhow!("--timeout-seconds must be greater than zero"));
+    }
+    let workdir = std::fs::canonicalize(workdir)?;
+    ensure_name_matches(name, &workdir)?;
+
+    let before = lima_status(name);
+    let action = if before.is_empty() {
+        "created"
+    } else if before == "Running" {
+        "reused"
+    } else {
+        "started"
+    };
+
+    if !before.is_empty() {
+        let existing = load_meta(name).ok_or_else(|| {
+            anyhow!("VM {name} exists but has no wtx metadata; refusing to adopt it implicitly")
+        })?;
+        if let Some(requested) = o.from.as_deref() {
+            if existing.seeded_from != requested {
+                let actual = if existing.seeded_from.is_empty() {
+                    "<none>"
+                } else {
+                    &existing.seeded_from
+                };
+                return Err(anyhow!(
+                    "VM {name} already exists with seeded_from={actual}; requested {requested}"
+                ));
+            }
+        }
+        // --from は新規作成専用。検証後は通常の再アタッチ経路へ流す。
+        o.from = None;
+    }
+
+    up_inner(name, &workdir.to_string_lossy(), o, json)?;
+
+    if let Some(owner) = owner {
+        let mut meta = load_meta(name).ok_or_else(|| anyhow!("metadata disappeared for {name}"))?;
+        meta.owner = Some(owner);
+        save_meta(name, &meta)?;
+    }
+
+    crate::sshx::wait_docker_ready(name, Duration::from_secs(timeout_seconds))?;
+    let instance = inspect_instance(name)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&EnsureReceipt {
+                schema_version: RECEIPT_SCHEMA_VERSION,
+                action,
+                instance,
+            })?
+        );
+    } else {
+        println!("{action}: {name} is ready");
+        println!("  worktree: {}", instance.worktree.path);
+        println!("  run: wtx shell {name}");
+        println!("  remove: wtx rm {name}");
+    }
+    Ok(())
+}
+
+fn inspect_instance(name: &str) -> Result<InstanceInspection> {
+    let meta =
+        load_meta(name).ok_or_else(|| anyhow!("no metadata for {name} (is it a wtx VM?)"))?;
+    let status = lima_status(name);
+    let docker_ready = status == "Running" && crate::sshx::docker_ready(name);
+    let orphaned = meta.workdir.is_empty() || !Path::new(&meta.workdir).exists();
+    let head = if orphaned {
+        String::new()
+    } else {
+        git_out(Path::new(&meta.workdir), &["rev-parse", "HEAD"])
+    };
+
+    let sim_states = if meta.sim_udid.is_empty() {
+        BTreeMap::new()
+    } else {
+        crate::sim::states_for(std::slice::from_ref(&meta.sim_udid))
+    };
+    let simulator = if meta.sim_udid.is_empty() {
+        None
+    } else {
+        Some(SimulatorInspection {
+            state: sim_states
+                .get(&meta.sim_udid)
+                .cloned()
+                .unwrap_or_else(|| "missing".to_string()),
+            udid: meta.sim_udid.clone(),
+            device_type: meta.sim_devicetype.clone(),
+        })
+    };
+    let ports = meta
+        .ports
+        .iter()
+        .map(|(label, port)| {
+            (
+                label.clone(),
+                PortInspection {
+                    host: port.host,
+                    guest: port.guest,
+                    forward_alive: crate::sshx::master_alive(name, port.host),
+                },
+            )
+        })
+        .collect();
+
+    Ok(InstanceInspection {
+        name: name.to_string(),
+        status,
+        ready: docker_ready,
+        runtime: RuntimeInspection {
+            docker: if docker_ready { "ready" } else { "unavailable" },
+        },
+        worktree: WorktreeInspection {
+            path: meta.workdir,
+            repo: meta.main_repo,
+            branch: meta.branch,
+            head,
+            orphaned,
+        },
+        seeded_from: meta.seeded_from,
+        owner: meta.owner,
+        simulator,
+        ports,
+    })
+}
+
+pub fn inspect(name: Option<&str>, json: bool) -> Result<()> {
+    let (name, _) = crate::sim::resolve(name)?;
+    let instance = inspect_instance(&name)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&InspectReceipt {
+                schema_version: RECEIPT_SCHEMA_VERSION,
+                instance,
+            })?
+        );
+        return Ok(());
+    }
+
+    println!(
+        "{}: {} ({})",
+        instance.name,
+        instance.status,
+        if instance.ready { "ready" } else { "not ready" }
+    );
+    println!("  worktree: {}", instance.worktree.path);
+    if !instance.worktree.branch.is_empty() {
+        println!("  branch: {}", instance.worktree.branch);
+    }
+    println!("  docker: {}", instance.runtime.docker);
+    if !instance.seeded_from.is_empty() {
+        println!("  seeded from: {}", instance.seeded_from);
+    }
+    if let Some(owner) = &instance.owner {
+        println!("  owner: {}", owner.kind);
+        for (key, value) in &owner.labels {
+            println!("    {key}={value}");
+        }
+    }
+    if let Some(sim) = &instance.simulator {
+        println!(
+            "  simulator: {} ({}) [{}]",
+            sim.udid, sim.device_type, sim.state
+        );
+    }
+    for (label, port) in &instance.ports {
+        println!(
+            "  port {label}: host {} -> guest {} [{}]",
+            port.host,
+            port.guest,
+            if port.forward_alive { "armed" } else { "down" }
+        );
+    }
     Ok(())
 }
 
@@ -608,6 +889,8 @@ pub fn ls_json() -> Result<()> {
         sim_udid: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         sim_state: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        owner: Option<OwnerMeta>,
     }
     let rows = list_instances();
     let sim_states = crate::sim::states_for(
@@ -637,6 +920,7 @@ pub fn ls_json() -> Result<()> {
             repo: i.repo,
             orphaned: i.orphaned,
             sim_udid: i.sim_udid,
+            owner: i.owner,
         })
         .collect();
     println!("{}", serde_json::to_string_pretty(&out)?);
@@ -656,6 +940,8 @@ pub struct Instance {
     pub orphaned: bool,
     /// worktree 専用シミュレータのUDID（空なら未作成）。
     pub sim_udid: String,
+    /// 外部オーケストレータの所有来歴。
+    pub owner: Option<OwnerMeta>,
 }
 
 pub fn list_instances() -> Vec<Instance> {
@@ -675,6 +961,7 @@ pub fn list_instances() -> Vec<Instance> {
                     .as_ref()
                     .map(|m| m.sim_udid.clone())
                     .unwrap_or_default(),
+                owner: meta.as_ref().and_then(|m| m.owner.clone()),
                 repo: meta.map(|m| m.main_repo).unwrap_or_default(),
             })
         })
