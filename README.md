@@ -156,7 +156,7 @@ See the [complete command reference](docs/CLI.md) or run `wtx --help`.
 Let the orchestrator own tasks and worktrees; let wtx own only runtime state:
 
 ```bash
-wtx ensure worker-a /abs/worktree --owner orca --json
+wtx ensure worker-a /abs/worktree --json
 wtx inspect worker-a --json
 wtx exec --name worker-a -w /abs/worktree -- docker compose up -d --wait
 ```
@@ -189,7 +189,7 @@ After installation, Codex can discover the skill automatically, or you can selec
 - [Command reference](docs/CLI.md): all commands and automation notes
 - [Operations and limitations](docs/OPERATIONS.md): sizing, cleanup, caveats, E2E checks
 - [Trust model](docs/TRUST-MODEL.md): mounts and credential boundary
-- [Orchestrator contract](docs/DESIGN-orchestration.md): readiness and ownership schema
+- [Orchestrator contract](docs/DESIGN-orchestration.md): readiness and cleanup order
 - [Simulator design](docs/DESIGN-sim.md): device and port assignment
 - [Verification notebook](VERIFICATION.md): real-VM experiments and rejected designs
 

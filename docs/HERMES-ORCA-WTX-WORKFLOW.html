@@ -1,0 +1,725 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101313">
+  <meta name="description" content="HermesをorchestratorとしてOrcaとwtxを組み合わせる開発ワークフロー">
+  <title>Hermes × Orca × wtx — 開発ワークフロー</title>
+  <style>
+    :root {
+      --ink: #f4f1e8;
+      --muted: #a6aca8;
+      --dim: #6f7874;
+      --bg: #101313;
+      --panel: #171b1b;
+      --panel-2: #1d2321;
+      --line: #2f3935;
+      --cream: #f3ead5;
+      --orange: #ff885c;
+      --orange-soft: #ffb08e;
+      --lime: #c9e86b;
+      --cyan: #75d7ce;
+      --blue: #8db8ff;
+      --danger: #ff716c;
+      --shadow: 0 20px 60px rgba(0, 0, 0, .24);
+      --radius: 18px;
+      --mono: "SFMono-Regular", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+      --sans: "Avenir Next", "Hiragino Sans", "Yu Gothic", "Noto Sans JP", system-ui, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 83% 3%, rgba(117, 215, 206, .10), transparent 28rem),
+        radial-gradient(circle at 8% 22%, rgba(255, 136, 92, .08), transparent 32rem),
+        var(--bg);
+      font-family: var(--sans);
+      line-height: 1.75;
+      letter-spacing: .015em;
+    }
+    a { color: inherit; }
+    code, pre, .eyebrow, .label, .step-number, .metric-value, .command { font-family: var(--mono); }
+    ::selection { color: var(--bg); background: var(--lime); }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      min-height: 56px;
+      padding: 0 5vw;
+      border-bottom: 1px solid rgba(244, 241, 232, .10);
+      background: rgba(16, 19, 19, .88);
+      backdrop-filter: blur(14px);
+    }
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-size: .78rem;
+      font-weight: 700;
+      letter-spacing: .12em;
+      text-decoration: none;
+      text-transform: uppercase;
+    }
+    .brand-mark {
+      display: grid;
+      place-items: center;
+      width: 26px;
+      height: 26px;
+      color: var(--bg);
+      background: var(--lime);
+      border-radius: 7px;
+      font-family: var(--mono);
+      font-size: .72rem;
+      font-weight: 900;
+    }
+    .topbar nav { display: flex; gap: 22px; }
+    .topbar nav a {
+      color: var(--muted);
+      font-size: .78rem;
+      text-decoration: none;
+    }
+    .topbar nav a:hover, .topbar nav a:focus-visible { color: var(--ink); }
+
+    main { overflow: hidden; }
+    .wrap { width: min(1180px, 90vw); margin: 0 auto; }
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.14fr) minmax(320px, .86fr);
+      gap: clamp(30px, 6vw, 90px);
+      align-items: end;
+      padding: clamp(78px, 11vw, 150px) 0 76px;
+    }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      color: var(--lime);
+      font-size: .72rem;
+      letter-spacing: .15em;
+      text-transform: uppercase;
+    }
+    .eyebrow::before {
+      content: "";
+      width: 28px;
+      height: 1px;
+      background: var(--lime);
+    }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 {
+      max-width: 800px;
+      margin: 22px 0 25px;
+      font-size: clamp(3.1rem, 7vw, 7.4rem);
+      font-weight: 700;
+      letter-spacing: -.075em;
+      line-height: .98;
+      text-wrap: balance;
+    }
+    h1 .accent { color: var(--orange); }
+    .hero-lead {
+      max-width: 650px;
+      color: var(--muted);
+      font-size: clamp(1.05rem, 1.8vw, 1.3rem);
+      text-wrap: pretty;
+    }
+    .hero-aside {
+      padding: 26px 0 4px 28px;
+      border-left: 1px solid var(--line);
+    }
+    .hero-aside p { color: var(--muted); font-size: .92rem; }
+    .hero-aside strong { color: var(--ink); font-weight: 600; }
+    .tag-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 28px; }
+    .tag {
+      padding: 5px 10px;
+      color: var(--cream);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      font-family: var(--mono);
+      font-size: .68rem;
+    }
+    .hero-strap {
+      margin-top: 36px;
+      color: var(--cream);
+      font-family: var(--mono);
+      font-size: .83rem;
+      line-height: 1.9;
+    }
+    .hero-strap span { color: var(--orange); }
+
+    .section { padding: 86px 0; border-top: 1px solid var(--line); }
+    .section-heading {
+      display: grid;
+      grid-template-columns: 180px minmax(0, 1fr);
+      gap: 35px;
+      margin-bottom: 42px;
+    }
+    .section-number {
+      color: var(--orange);
+      font-family: var(--mono);
+      font-size: .74rem;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+    h2 {
+      max-width: 770px;
+      margin-bottom: 14px;
+      font-size: clamp(2rem, 4vw, 4.25rem);
+      letter-spacing: -.055em;
+      line-height: 1.05;
+      text-wrap: balance;
+    }
+    .section-intro { max-width: 700px; color: var(--muted); }
+
+    .architecture {
+      display: grid;
+      grid-template-columns: 1fr 42px 1fr 42px 1fr;
+      align-items: stretch;
+      gap: 12px;
+      margin-top: 28px;
+    }
+    .arch-card {
+      position: relative;
+      min-height: 260px;
+      padding: 25px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+    .arch-card::before {
+      content: "";
+      position: absolute;
+      inset: 0 0 auto;
+      height: 4px;
+      border-radius: var(--radius) var(--radius) 0 0;
+      background: var(--orange);
+    }
+    .arch-card.orca::before { background: var(--cyan); }
+    .arch-card.wtx::before { background: var(--lime); }
+    .card-index { color: var(--dim); font-family: var(--mono); font-size: .72rem; }
+    .arch-card h3 { margin: 30px 0 8px; font-size: 1.5rem; letter-spacing: -.04em; }
+    .arch-card p { min-height: 57px; color: var(--muted); font-size: .9rem; }
+    .role-badge {
+      display: inline-block;
+      margin-top: 16px;
+      padding: 3px 8px;
+      color: var(--bg);
+      background: var(--orange);
+      border-radius: 4px;
+      font-family: var(--mono);
+      font-size: .65rem;
+      font-weight: 700;
+    }
+    .orca .role-badge { background: var(--cyan); }
+    .wtx .role-badge { background: var(--lime); }
+    .arch-arrow {
+      display: grid;
+      place-items: center;
+      color: var(--dim);
+      font-family: var(--mono);
+      font-size: 1.4rem;
+    }
+    .arch-arrow span { display: block; transform: translateY(-4px); }
+    .subsystems {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1px;
+      margin-top: 22px;
+      background: var(--line);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+    .subsystem { padding: 17px 19px; background: var(--panel-2); }
+    .subsystem .label { display: block; margin-bottom: 4px; color: var(--dim); font-size: .65rem; }
+    .subsystem strong { font-size: .87rem; font-weight: 600; }
+
+    .principle {
+      display: grid;
+      grid-template-columns: 1.1fr .9fr;
+      gap: 26px;
+      align-items: stretch;
+      margin-top: 46px;
+    }
+    .principle-main {
+      padding: 32px;
+      color: var(--bg);
+      background: var(--cream);
+      border-radius: var(--radius);
+    }
+    .principle-main .label { color: #74796f; font-size: .67rem; letter-spacing: .1em; }
+    .principle-main h3 { max-width: 640px; margin: 22px 0 0; font-size: clamp(1.65rem, 3vw, 3rem); letter-spacing: -.06em; line-height: 1.12; }
+    .principle-main h3 em { color: #d95e3f; font-style: normal; }
+    .principle-side { padding: 25px; border: 1px solid var(--line); border-radius: var(--radius); }
+    .principle-side ol { margin: 0; padding-left: 1.25rem; color: var(--muted); font-size: .9rem; }
+    .principle-side li + li { margin-top: 9px; }
+    .principle-side li::marker { color: var(--orange); font-family: var(--mono); }
+
+    .workflow-shell { padding: 28px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+    .step-nav {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 8px;
+      margin-bottom: 30px;
+    }
+    .step-button {
+      min-height: 72px;
+      padding: 11px 12px;
+      color: var(--muted);
+      background: transparent;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+      transition: border-color .2s ease, background .2s ease, color .2s ease, transform .2s ease;
+    }
+    .step-button:hover, .step-button:focus-visible { border-color: var(--orange); color: var(--ink); transform: translateY(-2px); }
+    .step-button.active { color: var(--bg); background: var(--orange); border-color: var(--orange); }
+    .step-button .step-number { display: block; margin-bottom: 5px; font-size: .68rem; opacity: .75; }
+    .step-button .step-title { display: block; font-size: .78rem; font-weight: 700; line-height: 1.25; }
+    .step-panel { display: none; grid-template-columns: minmax(0, 1fr) 300px; gap: 30px; align-items: start; }
+    .step-panel.active { display: grid; }
+    .step-panel h3 { margin: 0 0 12px; font-size: 1.75rem; letter-spacing: -.04em; }
+    .step-panel p { color: var(--muted); font-size: .92rem; }
+    .step-panel ul { margin: 17px 0 0; padding-left: 1.1rem; color: var(--muted); font-size: .87rem; }
+    .step-panel li + li { margin-top: 7px; }
+    .step-panel li::marker { color: var(--orange); }
+    .step-meta { padding: 18px; border-left: 1px solid var(--line); }
+    .meta-line { margin-bottom: 17px; }
+    .meta-line .label { display: block; margin-bottom: 4px; color: var(--dim); font-size: .63rem; letter-spacing: .12em; text-transform: uppercase; }
+    .meta-line strong { color: var(--cream); font-size: .84rem; font-weight: 600; }
+    .progress {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 31px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+      color: var(--dim);
+      font-family: var(--mono);
+      font-size: .68rem;
+    }
+    .progress-bar { flex: 1; height: 3px; margin: 0 14px; background: var(--line); overflow: hidden; }
+    .progress-bar i { display: block; width: 16.6%; height: 100%; background: var(--lime); transition: width .25s ease; }
+
+    .command-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 22px; margin-top: 28px; }
+    .command-card { overflow: hidden; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+    .command-head { display: flex; justify-content: space-between; align-items: center; padding: 13px 17px; border-bottom: 1px solid var(--line); }
+    .command-head .label { color: var(--dim); font-size: .66rem; letter-spacing: .11em; text-transform: uppercase; }
+    .copy-button {
+      padding: 5px 9px;
+      color: var(--muted);
+      background: transparent;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      font-family: var(--mono);
+      font-size: .63rem;
+      cursor: pointer;
+    }
+    .copy-button:hover, .copy-button:focus-visible { color: var(--ink); border-color: var(--lime); }
+    pre {
+      min-height: 124px;
+      margin: 0;
+      padding: 20px;
+      color: var(--cream);
+      background: #0c0f0f;
+      font-size: .77rem;
+      line-height: 1.9;
+      white-space: pre-wrap;
+      overflow: auto;
+    }
+    .syntax { color: var(--cyan); }
+    .syntax-key { color: var(--orange-soft); }
+    .syntax-comment { color: #65736e; }
+
+    .contract {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      margin-top: 28px;
+    }
+    .contract-card { padding: 22px; background: var(--panel); border: 1px solid var(--line); border-radius: 13px; }
+    .contract-card h3 { margin: 14px 0 8px; font-size: 1.1rem; }
+    .contract-card p { margin-bottom: 0; color: var(--muted); font-size: .83rem; }
+    .contract-card .label { color: var(--orange); font-size: .67rem; }
+    .contract-card:nth-child(2) .label { color: var(--cyan); }
+    .contract-card:nth-child(3) .label { color: var(--lime); }
+
+    .patterns { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 28px; }
+    .pattern { padding: 24px; border: 1px solid var(--line); border-radius: 13px; }
+    .pattern-number { color: var(--orange); font-family: var(--mono); font-size: .7rem; }
+    .pattern h3 { margin: 20px 0 9px; font-size: 1.15rem; }
+    .pattern p { color: var(--muted); font-size: .84rem; }
+    .pattern-flow { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 16px; }
+    .pattern-flow span { padding: 4px 7px; color: var(--cream); background: var(--panel-2); border-radius: 4px; font-family: var(--mono); font-size: .63rem; }
+    .pattern-flow b { color: var(--dim); font-family: var(--mono); font-size: .65rem; font-weight: 400; }
+
+    .guardrails { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; margin-top: 28px; background: var(--line); border: 1px solid var(--line); border-radius: 13px; overflow: hidden; }
+    .guardrail { display: grid; grid-template-columns: 35px 1fr; gap: 12px; padding: 19px; background: var(--panel); }
+    .guardrail-mark { display: grid; place-items: center; width: 26px; height: 26px; color: var(--bg); background: var(--lime); border-radius: 50%; font-family: var(--mono); font-size: .72rem; font-weight: 800; }
+    .guardrail.danger .guardrail-mark { background: var(--danger); }
+    .guardrail strong { display: block; margin-bottom: 4px; font-size: .88rem; }
+    .guardrail p { margin: 0; color: var(--muted); font-size: .78rem; line-height: 1.6; }
+
+    .timeline { position: relative; display: grid; gap: 0; margin-top: 28px; }
+    .timeline::before { content: ""; position: absolute; top: 19px; bottom: 19px; left: 16px; width: 1px; background: var(--line); }
+    .timeline-item { position: relative; display: grid; grid-template-columns: 33px 160px 1fr; gap: 18px; align-items: start; padding: 15px 0; }
+    .timeline-dot { z-index: 1; width: 33px; height: 33px; padding-top: 6px; color: var(--bg); background: var(--orange); border-radius: 50%; font-family: var(--mono); font-size: .68rem; font-weight: 800; text-align: center; }
+    .timeline-item:nth-child(odd) .timeline-dot { background: var(--cyan); }
+    .timeline-role { padding-top: 5px; color: var(--cream); font-family: var(--mono); font-size: .74rem; }
+    .timeline-copy { color: var(--muted); font-size: .86rem; }
+    .timeline-copy strong { color: var(--ink); font-weight: 600; }
+
+    .source-note { margin-top: 25px; color: var(--dim); font-size: .78rem; }
+    .source-note a { color: var(--muted); text-underline-offset: 3px; }
+    .closing { padding: 82px 0 112px; }
+    .closing-box { display: grid; grid-template-columns: 1fr auto; gap: 30px; align-items: end; padding: clamp(28px, 5vw, 60px); background: var(--orange); border-radius: var(--radius); color: var(--bg); }
+    .closing-box h2 { max-width: 700px; margin-bottom: 10px; }
+    .closing-box p { max-width: 620px; margin-bottom: 0; color: rgba(16, 19, 19, .72); }
+    .closing-rule { max-width: 190px; color: var(--bg); font-family: var(--mono); font-size: .75rem; line-height: 2; text-align: right; }
+    footer { padding: 25px 0 34px; color: var(--dim); border-top: 1px solid var(--line); font-family: var(--mono); font-size: .68rem; }
+    footer .wrap { display: flex; justify-content: space-between; gap: 20px; }
+
+    @media (max-width: 900px) {
+      .hero { grid-template-columns: 1fr; padding-top: 80px; }
+      .hero-aside { max-width: 650px; padding: 0; border: 0; }
+      .architecture { grid-template-columns: 1fr; }
+      .arch-arrow { min-height: 20px; transform: rotate(90deg); }
+      .subsystems, .contract, .patterns { grid-template-columns: 1fr; }
+      .principle { grid-template-columns: 1fr; }
+      .step-nav { grid-template-columns: repeat(3, 1fr); }
+      .step-panel { grid-template-columns: 1fr; }
+      .step-meta { padding: 18px 0 0; border-top: 1px solid var(--line); border-left: 0; }
+      .command-grid { grid-template-columns: 1fr; }
+      .closing-box { grid-template-columns: 1fr; }
+      .closing-rule { text-align: left; }
+    }
+    @media (max-width: 600px) {
+      .topbar { padding: 0 5vw; }
+      .topbar nav { display: none; }
+      .wrap { width: 90vw; }
+      .section { padding: 64px 0; }
+      .section-heading { display: block; }
+      .section-number { display: block; margin-bottom: 17px; }
+      h1 { font-size: clamp(3rem, 16vw, 5rem); }
+      .workflow-shell { padding: 15px; }
+      .step-nav { grid-template-columns: repeat(2, 1fr); }
+      .step-button { min-height: 64px; }
+      .guardrails { grid-template-columns: 1fr; }
+      .timeline-item { grid-template-columns: 33px 1fr; gap: 12px; }
+      .timeline-role { grid-column: 2; grid-row: 1; padding-top: 0; }
+      .timeline-copy { grid-column: 2; }
+      footer .wrap { display: block; }
+      footer .wrap span + span { display: block; margin-top: 8px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#top" aria-label="ページの先頭へ">
+      <span class="brand-mark">w</span>
+      <span>workflow note</span>
+    </a>
+    <nav aria-label="ページ内ナビゲーション">
+      <a href="#architecture">役割分担</a>
+      <a href="#flow">標準フロー</a>
+      <a href="#rules">契約と安全策</a>
+    </nav>
+  </header>
+
+  <main id="top">
+    <div class="wrap">
+      <section class="hero" aria-labelledby="page-title">
+        <div>
+          <span class="eyebrow">Hermes × Orca × wtx</span>
+          <h1 id="page-title">考える。<span class="accent">動かす。</span><br>分離する。</h1>
+          <p class="hero-lead">Hermesをorchestratorの中心に置き、Orcaでエージェントとworktreeを調整し、wtxでworktreeごとのruntimeを分離する開発ワークフロー。</p>
+          <div class="tag-row" aria-label="このページのキーワード">
+            <span class="tag">control plane</span>
+            <span class="tag">task DAG</span>
+            <span class="tag">runtime isolation</span>
+            <span class="tag">barrier first</span>
+          </div>
+        </div>
+        <aside class="hero-aside">
+          <p><strong>設計の一行要約</strong></p>
+          <p class="hero-strap"><span>Hermes</span> は「何を、どの順で、どの条件なら進めるか」を決める。<br><span>Orca</span> は「誰が、どのworktreeで動いているか」を持つ。<br><span>wtx</span> は「そのworktreeのサービス環境」を用意する。</p>
+        </aside>
+      </section>
+
+      <section class="section" id="architecture" aria-labelledby="architecture-title">
+        <div class="section-heading">
+          <div class="section-number">01 / architecture</div>
+          <div>
+            <h2 id="architecture-title">3つの層に、3つの責務。</h2>
+            <p class="section-intro">境界を混ぜないことが、並列開発を安定させる。Hermes・Orca・wtxは、同じ「開発を自動化する道具」でも管理する状態が異なる。</p>
+          </div>
+        </div>
+
+        <div class="architecture" role="img" aria-label="HermesからOrcaを経由してwtxへ流れる責務の図">
+          <article class="arch-card hermes">
+            <span class="card-index">LAYER 01</span>
+            <h3>Hermes</h3>
+            <p>要求を理解し、タスクを分解し、結果を見て次の判断をする。</p>
+            <span class="role-badge">DECISION / ROLE</span>
+          </article>
+          <div class="arch-arrow" aria-hidden="true"><span>→</span></div>
+          <article class="arch-card orca">
+            <span class="card-index">LAYER 02</span>
+            <h3>Orca</h3>
+            <p>task、worktree、agent terminal、完了状態を調整する。</p>
+            <span class="role-badge">EXECUTION / ROLE</span>
+          </article>
+          <div class="arch-arrow" aria-hidden="true"><span>→</span></div>
+          <article class="arch-card wtx">
+            <span class="card-index">LAYER 03</span>
+            <h3>wtx</h3>
+            <p>VM、dockerd、DB、port、service、runtime readinessを持つ。</p>
+            <span class="role-badge">RUNTIME / ROLE</span>
+          </article>
+        </div>
+        <div class="subsystems" aria-label="各層が管理する状態">
+          <div class="subsystem"><span class="label">Hermes owns</span><strong>要件 / DAG / policy / decision gate</strong></div>
+          <div class="subsystem"><span class="label">Orca owns</span><strong>task / worktree / terminal / worker state</strong></div>
+          <div class="subsystem"><span class="label">wtx owns</span><strong>VM / Docker / DB / port / readiness</strong></div>
+        </div>
+
+        <div class="principle">
+          <div class="principle-main">
+            <span class="label">THE OPERATING PRINCIPLE</span>
+            <h3>Hermesが直接すべてを触るのではなく、<em>各層の状態をその層のAPIで更新する。</em></h3>
+          </div>
+          <div class="principle-side">
+            <ol>
+              <li>タスクとworktreeはOrcaに作らせる</li>
+              <li>runtimeの準備はwtxに委譲する</li>
+              <li>判断と例外処理はHermesに戻す</li>
+            </ol>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="flow" aria-labelledby="flow-title">
+        <div class="section-heading">
+          <div class="section-number">02 / standard flow</div>
+          <div>
+            <h2 id="flow-title">標準フローは、<br>barrierを中心に組む。</h2>
+            <p class="section-intro">worktreeが作られたことと、runtimeが使えることは別の状態。agentの開始は、wtxのready receiptを受け取った後にだけ許可する。</p>
+          </div>
+        </div>
+
+        <div class="workflow-shell">
+          <div class="step-nav" role="tablist" aria-label="標準フローのステップ">
+            <button class="step-button active" role="tab" aria-selected="true" aria-controls="step-1" data-step="1"><span class="step-number">01</span><span class="step-title">要求を受ける</span></button>
+            <button class="step-button" role="tab" aria-selected="false" aria-controls="step-2" data-step="2"><span class="step-number">02</span><span class="step-title">DAGに分解</span></button>
+            <button class="step-button" role="tab" aria-selected="false" aria-controls="step-3" data-step="3"><span class="step-number">03</span><span class="step-title">Orcaで分岐</span></button>
+            <button class="step-button" role="tab" aria-selected="false" aria-controls="step-4" data-step="4"><span class="step-number">04</span><span class="step-title">wtxをensure</span></button>
+            <button class="step-button" role="tab" aria-selected="false" aria-controls="step-5" data-step="5"><span class="step-number">05</span><span class="step-title">実装・検証</span></button>
+            <button class="step-button" role="tab" aria-selected="false" aria-controls="step-6" data-step="6"><span class="step-number">06</span><span class="step-title">review・統合</span></button>
+          </div>
+
+          <article class="step-panel active" id="step-1" role="tabpanel" tabindex="0">
+            <div><h3>要求を、実行可能な単位にする。</h3><p>Hermesはユーザーの要求をそのままagentへ投げず、対象リポジトリの規約・依存関係・受け入れ条件を先に確認する。</p><ul><li>変更対象と変更しない範囲を決める</li><li>必要なサービス、DB、Simulatorを特定する</li><li>完了条件をテスト可能な言葉にする</li></ul></div>
+            <aside class="step-meta"><div class="meta-line"><span class="label">role</span><strong>Hermes</strong></div><div class="meta-line"><span class="label">output</span><strong>task brief + acceptance criteria</strong></div><div class="meta-line"><span class="label">next gate</span><strong>DAGへ分解できるか</strong></div></aside>
+          </article>
+          <article class="step-panel" id="step-2" role="tabpanel" tabindex="0">
+            <div><h3>依存関係を、DAGとして見える化する。</h3><p>独立して進められる作業と、前段の成果物が必要な作業を分ける。並列化は「同時にできるか」ではなく「同じ状態を触らないか」で判断する。</p><ul><li>design → API / frontend / testsの依存を定義</li><li>merge前に必要なreviewを後段へ置く</li><li>曖昧な仕様は作業開始前にescalateする</li></ul></div>
+            <aside class="step-meta"><div class="meta-line"><span class="label">role</span><strong>Hermes</strong></div><div class="meta-line"><span class="label">output</span><strong>task DAG + dispatch plan</strong></div><div class="meta-line"><span class="label">next gate</span><strong>依存のないtaskから開始</strong></div></aside>
+          </article>
+          <article class="step-panel" id="step-3" role="tabpanel" tabindex="0">
+            <div><h3>Orcaにworktreeと実行単位を持たせる。</h3><p>各taskは専用worktreeとagent terminalに割り当てる。Hermesが覚えておくのは目的と制約、Orcaが持つのは実際の実行状態。</p><ul><li>parallel taskは別worktreeにする</li><li>agent間のやり取りはOrcaのthread / task状態へ残す</li><li>完了・block・escalationを明示的な状態にする</li></ul></div>
+            <aside class="step-meta"><div class="meta-line"><span class="label">role</span><strong>Orca</strong></div><div class="meta-line"><span class="label">output</span><strong>worktree path + agent terminal</strong></div><div class="meta-line"><span class="label">next gate</span><strong>wtx ready receipt</strong></div></aside>
+          </article>
+          <article class="step-panel" id="step-4" role="tabpanel" tabindex="0">
+            <div><h3>agentを起動する前に、runtimeを保証する。</h3><p>Orcaがworktreeを作っただけでは、DBやDockerが使えるとは限らない。wtxの冪等なensureをbarrierとして扱い、readyになるまでagentを起動しない。</p><ul><li><code>wtx ensure ... --json</code>の成功を待つ</li><li>必要なserviceを<code>wtx exec</code>で起動する</li><li>失敗時はtaskをblockし、host Dockerへfallbackしない</li></ul></div>
+            <aside class="step-meta"><div class="meta-line"><span class="label">role</span><strong>wtx</strong></div><div class="meta-line"><span class="label">output</span><strong>schema_version付きready receipt</strong></div><div class="meta-line"><span class="label">next gate</span><strong>agent startupを許可</strong></div></aside>
+          </article>
+          <article class="step-panel" id="step-5" role="tabpanel" tabindex="0">
+            <div><h3>編集はhost、runtime依存の検証はVMへ。</h3><p>coding agent、editor、Git、GitHub操作はhostで行う。Docker、DB、service、container依存testだけをwtxへ送る。</p><ul><li>agentは通常のworktreeファイルを編集する</li><li><code>wtx exec -- docker compose ...</code>でサービスを操作する</li><li>完了報告には変更・テスト・未検証リスクを含める</li></ul></div>
+            <aside class="step-meta"><div class="meta-line"><span class="label">role</span><strong>coding agent</strong></div><div class="meta-line"><span class="label">output</span><strong>commit + structured result</strong></div><div class="meta-line"><span class="label">next gate</span><strong>worker_done / escalation</strong></div></aside>
+          </article>
+          <article class="step-panel" id="step-6" role="tabpanel" tabindex="0">
+            <div><h3>レビュー結果をHermesが統合判断する。</h3><p>実装完了は統合可能と同義ではない。Orcaでreview gateを開き、Hermesが指摘・テスト・リスクを比較して次のtaskを解除する。</p><ul><li>correctness / security / test観点を分けてreviewする</li><li>重大指摘は実装taskへ戻す</li><li>runtime cleanup成功後にworktreeを閉じる</li></ul></div>
+            <aside class="step-meta"><div class="meta-line"><span class="label">role</span><strong>Hermes + Orca</strong></div><div class="meta-line"><span class="label">output</span><strong>merge decision / reopen / block</strong></div><div class="meta-line"><span class="label">next gate</span><strong>統合またはユーザー確認</strong></div></aside>
+          </article>
+
+          <div class="progress" aria-live="polite"><span id="progress-label">STEP 01 / 06</span><span class="progress-bar" aria-hidden="true"><i id="progress-bar-fill"></i></span><span id="progress-role">HERMES</span></div>
+        </div>
+      </section>
+
+      <section class="section" aria-labelledby="commands-title">
+        <div class="section-heading">
+          <div class="section-number">03 / runtime contract</div>
+          <div>
+            <h2 id="commands-title">wtxは、runtimeだけを持つ。</h2>
+            <p class="section-intro">Orcaが作ったworktreeの絶対パスをjoin keyにして、wtxがVMとruntime readinessを返す。taskの進捗やagentの状態をwtxに持ち込まない。</p>
+          </div>
+        </div>
+
+        <div class="command-grid">
+          <article class="command-card">
+            <div class="command-head"><span class="label">01 / readiness barrier</span><button class="copy-button" type="button" data-copy-target="cmd-ensure">copy</button></div>
+            <pre id="cmd-ensure"><span class="syntax-comment"># worktree作成後、agent起動前に実行</span>
+<span class="syntax">wtx ensure</span> "$ORCA_WORKTREE_PATH" \
+  <span class="syntax-key">--json</span></pre>
+          </article>
+          <article class="command-card">
+            <div class="command-head"><span class="label">02 / service startup</span><button class="copy-button" type="button" data-copy-target="cmd-service">copy</button></div>
+            <pre id="cmd-service"><span class="syntax-comment"># container依存のcommandだけVMへ</span>
+<span class="syntax">wtx exec --</span> docker compose \
+  up -d <span class="syntax-key">--wait</span>
+<span class="syntax">wtx port add</span> api:3000
+<span class="syntax">wtx env</span></pre>
+          </article>
+          <article class="command-card">
+            <div class="command-head"><span class="label">03 / inspect</span><button class="copy-button" type="button" data-copy-target="cmd-inspect">copy</button></div>
+            <pre id="cmd-inspect"><span class="syntax-comment"># readiness / branch / portを機械的に確認</span>
+<span class="syntax">wtx inspect</span> "$WTX_VM_NAME" \
+  <span class="syntax-key">--json</span>
+<span class="syntax-comment"># stdout: JSON / stderr: warning</span></pre>
+          </article>
+          <article class="command-card">
+            <div class="command-head"><span class="label">04 / cleanup order</span><button class="copy-button" type="button" data-copy-target="cmd-cleanup">copy</button></div>
+            <pre id="cmd-cleanup"><span class="syntax-comment"># runtimeを先に消してからworktreeを閉じる</span>
+<span class="syntax">wtx rm</span> "$WTX_VM_NAME" \
+  <span class="syntax-key">--if-exists --json</span>
+<span class="syntax-comment"># success後にOrca側でworktreeをarchive</span></pre>
+          </article>
+        </div>
+        <p class="source-note">コマンドの正確な引数は実行中のbinaryのhelpを優先。詳細は <a href="DESIGN-orchestration.md">Orchestrator contract</a> と <a href="CLI.md">CLI reference</a> を参照。</p>
+
+        <div class="contract" aria-label="責務の境界">
+          <article class="contract-card"><span class="label">ORCHESTRATOR</span><h3>taskとworktree</h3><p>Orca / Hermesが所有。依存関係、agent terminal、完了状態、review gateを扱う。</p></article>
+          <article class="contract-card"><span class="label">JOIN KEY</span><h3>正規化済み絶対パス</h3><p>Orcaが作ったworktreeと、wtxが準備するVMを結びつける不変の参照。</p></article>
+          <article class="contract-card"><span class="label">RUNTIME PROVIDER</span><h3>VMとサービス</h3><p>wtxが所有。dockerd、DB、volume、port、Simulator、readinessを扱う。</p></article>
+        </div>
+      </section>
+
+      <section class="section" aria-labelledby="patterns-title">
+        <div class="section-heading">
+          <div class="section-number">04 / patterns</div>
+          <div>
+            <h2 id="patterns-title">この構成から広げられる3つの型。</h2>
+            <p class="section-intro">最初はFeature DAGから始め、原因調査とレビューを分離する。runtimeが分かれることで、並列作業の失敗を比較可能にできる。</p>
+          </div>
+        </div>
+        <div class="patterns">
+          <article class="pattern"><span class="pattern-number">PATTERN 01</span><h3>Feature DAG</h3><p>API、frontend、migration、testsを依存関係付きで並列化する通常形。</p><div class="pattern-flow"><span>design</span><b>→</b><span>API</span><b>+</b><span>web</span><b>→</b><span>review</span></div></article>
+          <article class="pattern"><span class="pattern-number">PATTERN 02</span><h3>Bug matrix</h3><p>同じ再現手順を複数のwtx VMで実行し、発生条件を比較してから修正する。</p><div class="pattern-flow"><span>repro</span><b>→</b><span>VM A</span><b>+</b><span>VM B</span><b>→</b><span>cause</span></div></article>
+          <article class="pattern"><span class="pattern-number">PATTERN 03</span><h3>Review tournament</h3><p>correctness、security、testを別のreviewerに分担し、Hermesが判断を集約する。</p><div class="pattern-flow"><span>code</span><b>→</b><span>3 reviews</span><b>→</b><span>gate</span></div></article>
+        </div>
+      </section>
+
+      <section class="section" id="rules" aria-labelledby="rules-title">
+        <div class="section-heading">
+          <div class="section-number">05 / guardrails</div>
+          <div>
+            <h2 id="rules-title">自動化するほど、<br>ルールは少なく強く。</h2>
+            <p class="section-intro">このワークフローで守るべき不変条件。特に「準備失敗時に別runtimeへ逃がさない」が重要。</p>
+          </div>
+        </div>
+        <div class="guardrails">
+          <article class="guardrail"><span class="guardrail-mark">01</span><div><strong>agentはready receiptの後に起動</strong><p>worktree.createdのeventだけを信頼せず、wtx ensureの成功をbarrierにする。</p></div></article>
+          <article class="guardrail danger"><span class="guardrail-mark">02</span><div><strong>host Dockerへsilent fallbackしない</strong><p>wtxが失敗したらtaskをblockし、別の共有runtimeで続行しない。</p></div></article>
+          <article class="guardrail"><span class="guardrail-mark">03</span><div><strong>agentとGitはhost、serviceはVM</strong><p>標準形ではcredentialsもhostに置き、VM内agentへの共有は明示的なopt-inにする。</p></div></article>
+          <article class="guardrail"><span class="guardrail-mark">04</span><div><strong>cleanupはruntimeが先</strong><p>wtx rmの成功を確認してから、Orca側のworktreeを閉じる。</p></div></article>
+          <article class="guardrail"><span class="guardrail-mark">05</span><div><strong>parallel taskは別worktree</strong><p>同じファイルと同じGit refを複数agentが同時に編集しない。</p></div></article>
+          <article class="guardrail danger"><span class="guardrail-mark">06</span><div><strong>wtxをsecurity sandboxと誤認しない</strong><p>sourceと.gitはhost-visible。信頼できないcodeの封じ込め用途ではない。</p></div></article>
+        </div>
+      </section>
+
+      <section class="section" aria-labelledby="lifecycle-title">
+        <div class="section-heading">
+          <div class="section-number">06 / lifecycle</div>
+          <div>
+            <h2 id="lifecycle-title">一つのtaskの、始まりから終わりまで。</h2>
+            <p class="section-intro">担当層を追うと、どこで止まり、どこへ戻すべきかが見える。</p>
+          </div>
+        </div>
+        <div class="timeline">
+          <div class="timeline-item"><span class="timeline-dot">01</span><span class="timeline-role">Hermes / plan</span><div class="timeline-copy"><strong>要求をtask briefへ変換。</strong> 受け入れ条件と依存関係を確定する。</div></div>
+          <div class="timeline-item"><span class="timeline-dot">02</span><span class="timeline-role">Orca / dispatch</span><div class="timeline-copy"><strong>worktreeとagent terminalを作成。</strong> 実行単位をOrcaの状態に登録する。</div></div>
+          <div class="timeline-item"><span class="timeline-dot">03</span><span class="timeline-role">wtx / ensure</span><div class="timeline-copy"><strong>専用VMとdockerdをreadyにする。</strong> receiptを返すまでagentを待たせる。</div></div>
+          <div class="timeline-item"><span class="timeline-dot">04</span><span class="timeline-role">agent / implement</span><div class="timeline-copy"><strong>hostで編集し、VMでサービス依存テスト。</strong> 変更と検証結果を報告する。</div></div>
+          <div class="timeline-item"><span class="timeline-dot">05</span><span class="timeline-role">Hermes / decide</span><div class="timeline-copy"><strong>review結果を統合。</strong> merge、reopen、block、ユーザー確認のいずれかを選ぶ。</div></div>
+          <div class="timeline-item"><span class="timeline-dot">06</span><span class="timeline-role">wtx → Orca / cleanup</span><div class="timeline-copy"><strong>runtimeを削除してからworktreeを閉じる。</strong> 失敗したらworktreeを残して再試行する。</div></div>
+        </div>
+      </section>
+
+      <section class="closing" aria-label="まとめ">
+        <div class="closing-box">
+          <div><h2>Hermesが決め、Orcaが追跡し、wtxが隔離する。</h2><p>この3者の責務を分けることで、複数のcoding agentを走らせても、taskの状態・Gitの作業場所・runtimeの状態を混ぜずに管理できる。</p></div>
+          <div class="closing-rule">DECIDE<br>EXECUTE<br>ISOLATE</div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer><div class="wrap"><span>Hermes × Orca × wtx / workflow note</span><span>Based on docs/DESIGN-orchestration.md and docs/TRUST-MODEL.md</span></div></footer>
+
+  <script>
+    (() => {
+      const buttons = [...document.querySelectorAll('.step-button')];
+      const panels = [...document.querySelectorAll('.step-panel')];
+      const progressLabel = document.querySelector('#progress-label');
+      const progressRole = document.querySelector('#progress-role');
+      const progressFill = document.querySelector('#progress-bar-fill');
+      const roles = ['HERMES', 'HERMES', 'ORCA', 'WTX', 'AGENT', 'HERMES + ORCA'];
+
+      function activateStep(step) {
+        const index = Number(step) - 1;
+        buttons.forEach((button, i) => {
+          const active = i === index;
+          button.classList.toggle('active', active);
+          button.setAttribute('aria-selected', String(active));
+          button.tabIndex = active ? 0 : -1;
+        });
+        panels.forEach((panel, i) => panel.classList.toggle('active', i === index));
+        progressLabel.textContent = `STEP ${String(index + 1).padStart(2, '0')} / 06`;
+        progressRole.textContent = roles[index];
+        progressFill.style.width = `${((index + 1) / buttons.length) * 100}%`;
+      }
+
+      buttons.forEach((button, index) => {
+        button.addEventListener('click', () => activateStep(button.dataset.step));
+        button.addEventListener('keydown', (event) => {
+          if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(event.key)) return;
+          event.preventDefault();
+          let next = index;
+          if (event.key === 'ArrowRight') next = (index + 1) % buttons.length;
+          if (event.key === 'ArrowLeft') next = (index - 1 + buttons.length) % buttons.length;
+          if (event.key === 'Home') next = 0;
+          if (event.key === 'End') next = buttons.length - 1;
+          activateStep(String(next + 1));
+          buttons[next].focus();
+        });
+      });
+
+      document.querySelectorAll('.copy-button').forEach((button) => {
+        button.addEventListener('click', async () => {
+          const target = document.getElementById(button.dataset.copyTarget);
+          const text = target.innerText.replace(/^\s*#.*$/gm, '').trim();
+          try {
+            await navigator.clipboard.writeText(text);
+            button.textContent = 'copied';
+          } catch {
+            button.textContent = 'select manually';
+          }
+          window.setTimeout(() => { button.textContent = 'copy'; }, 1400);
+        });
+      });
+    })();
+  </script>
+</body>
+</html>

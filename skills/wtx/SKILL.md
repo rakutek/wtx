@@ -52,7 +52,7 @@ wtx new BRANCH --from NAME             # 既存VMからDB(volume)・イメージ
 wtx up                                 # worktree内で引数なし: そのworktreeのVMを解決して作成/起動
 wtx up NAME ~/repos/worktree-dir       # 明示形（worktree自動判別、gitはホストと共有）
 wtx ensure NAME ~/repos/worktree-dir --json # 冪等に作成/起動し、dockerd ready receiptを返す
-wtx inspect NAME --json                # runtime・worktree・owner・port・sim状態
+wtx inspect NAME --json                # runtime・worktree・port・sim状態
 wtx exec -- docker compose up -d --wait # worktree内ではNAME/-w不要
 wtx exec --name NAME -- docker compose up -d --wait # 明示形
 wtx port add api:3000                   # VM内portへ衝突しないhost portを自動割当
@@ -77,9 +77,8 @@ wtx upgrade                            # Homebrewのtap情報更新 + wtx本体�
 - 対話CLIは `wtx exec [--name NAME] --tty -- CMD...` で起動する。`--tty` はSSHのPTYを
   強制割り当てし、window resize・signal・終了コードをSSH経由で中継する。
 - オーケストレータからは `wtx ensure ... --json` を使う。VMが無ければ作成、停止中なら起動、
-  実行中なら再利用し、dockerd readyまで待って `schema_version: 1` のreceiptを返す。
-  `--owner orca` / `--owner herdr` はcleanup用の来歴であり、wtx自身はtask statusや
-  dispatch lifecycleを管理しない。
+  実行中なら再利用し、dockerd readyまで待って `schema_version: 2` のreceiptを返す。
+  wtx自身はtask statusやdispatch lifecycleを管理しない。
 - `ensure` で既存VMに `--from` を指定した場合は再cloneせず、記録済み `seeded_from` と
   一致するか検証する。違うseedへ変更したい場合は新しいVMを作る。
 - `wtx up` の主なフラグ: `--from`（既存VMから環境を引き継ぐ）、`--memory/--cpus`
@@ -141,10 +140,10 @@ container依存testだけを`wtx exec`でVMへ送る。Composeは禁止せず、
 worktree作成とagent開始を次の順で直列化する:
 
 1. OrcaまたはHerdrでworktreeを作成し、返された絶対pathを読む
-2. `wtx ensure WORKTREE_PATH --owner orca|herdr --json`の成功を待つ
+2. `wtx ensure WORKTREE_PATH --json`の成功を待つ
 3. 成功後にだけ、そのworktreeのagentを開始する
 
-Orcaではnative setup hookから`wtx ensure "$ORCA_WORKTREE_PATH" --owner orca --json`を呼び、
+Orcaではnative setup hookから`wtx ensure "$ORCA_WORKTREE_PATH" --json`を呼び、
 agent startupをsetup完了待ちにする方法も使える。Herdrではworktree createの結果を受けた
 親agentが`ensure`を待ってからroot paneでagentを開始する。事後eventだけに準備を任せない。
 

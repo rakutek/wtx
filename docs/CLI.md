@@ -7,8 +7,8 @@ Run `wtx --help` or `wtx <command> --help` for the authoritative option list.
 | `wtx new BRANCH [--dir DIR]` | Create a git worktree and its VM in one step. The branch is created if missing; `--from`, `--sim`, and other VM options apply. |
 | `wtx up [NAME] [DIR]` | Create or start a VM for an existing worktree. With no arguments, resolve it from the current directory. |
 | `wtx up NAME DIR --from SRC` | Create a VM seeded with another VM's volumes, images, and tools. |
-| `wtx ensure [NAME] [DIR] [--json]` | Idempotently create or start a VM, wait for dockerd, and optionally record owner provenance. |
-| `wtx inspect [NAME] [--json]` | Report VM/worktree readiness, seed, owner, ports, and simulator state. |
+| `wtx ensure [NAME] [DIR] [--json]` | Idempotently create or start a VM and wait for dockerd. |
+| `wtx inspect [NAME] [--json]` | Report VM/worktree readiness, seed, ports, and simulator state. |
 | `wtx exec [--name NAME] [-w DIR] [--tty] -- CMD…` | Run a command in the cwd-resolved VM; the current directory is also the default guest directory. |
 | `wtx shell [NAME]` | Open an interactive VM shell. NAME resolves from the current directory when omitted. |
 | `wtx ls [--json]` | List VMs and flag VMs whose worktrees are gone. |
@@ -41,5 +41,5 @@ wtx exec -- bash -c 'command-a | command-b'
 ## Automation
 
 `ensure`, `inspect`, `ls`, `rm`, `env`, and update checks expose JSON where scripts need
-stable machine-readable output. The orchestrator ownership boundary and receipt schema are
+stable machine-readable output. The orchestrator readiness contract and receipt schema are
 documented in [DESIGN-orchestration.md](DESIGN-orchestration.md).

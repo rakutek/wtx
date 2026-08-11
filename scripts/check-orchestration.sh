@@ -25,22 +25,15 @@ git -C "$CHECK_ROOT" add base.txt
 git -C "$CHECK_ROOT" commit -qm init
 
 FIRST=$(
-  "$WTX" ensure "$CHECK_VM" "$CHECK_ROOT" \
-    --owner orca \
-    --owner-label run_id=run_check \
-    --owner-label task_id=task_check \
-    --owner-label dispatch_id=dispatch_check \
-    --json
+  "$WTX" ensure "$CHECK_VM" "$CHECK_ROOT" --json
 )
 printf '%s' "$FIRST" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
-assert d["schema_version"] == 1
+assert d["schema_version"] == 2
 assert d["action"] == "created"
 assert d["instance"]["ready"] is True
 assert d["instance"]["runtime"]["docker"] == "ready"
-assert d["instance"]["owner"]["kind"] == "orca"
-assert d["instance"]["owner"]["labels"]["task_id"] == "task_check"
 '
 
 SECOND=$("$WTX" ensure "$CHECK_VM" "$CHECK_ROOT" --json)
@@ -48,7 +41,6 @@ printf '%s' "$SECOND" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 assert d["action"] == "reused"
-assert d["instance"]["owner"]["labels"]["run_id"] == "run_check"
 '
 
 "$WTX" stop "$CHECK_VM" >/dev/null
@@ -58,7 +50,6 @@ import json, sys
 d = json.load(sys.stdin)
 assert d["action"] == "started"
 assert d["instance"]["ready"] is True
-assert d["instance"]["owner"]["labels"]["dispatch_id"] == "dispatch_check"
 '
 
 if "$WTX" ensure "$CHECK_VM" "$CHECK_ROOT" --from another-seed --json >/dev/null 2>&1; then
@@ -70,7 +61,7 @@ INSPECT=$("$WTX" inspect "$CHECK_VM" --json)
 printf '%s' "$INSPECT" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
-assert d["schema_version"] == 1
+assert d["schema_version"] == 2
 assert d["instance"]["worktree"]["orphaned"] is False
 assert len(d["instance"]["worktree"]["head"]) == 40
 '
@@ -81,7 +72,7 @@ REMOVED=$("$WTX" rm "$CHECK_VM" --if-exists --json)
 printf '%s' "$REMOVED" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
-assert d["schema_version"] == 1
+assert d["schema_version"] == 2
 assert d["action"] == "deleted"
 assert d["name"] == sys.argv[1]
 ' "$CHECK_VM"
@@ -90,7 +81,7 @@ MISSING=$("$WTX" rm "$CHECK_VM" --if-exists --json)
 printf '%s' "$MISSING" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
-assert d["schema_version"] == 1
+assert d["schema_version"] == 2
 assert d["action"] == "not_found"
 assert d["name"] == sys.argv[1]
 ' "$CHECK_VM"

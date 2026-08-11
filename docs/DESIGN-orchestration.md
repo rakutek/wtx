@@ -8,13 +8,10 @@ wtx は worktree ごとの runtime provider であり、task scheduler ではな
 - wtx: VM、dockerd、DB、port、Simulator、runtime readinessを所有する
 - 両者のjoin key: worktreeの正規化済み絶対パス
 
-owner metadataはcleanupと監査のための来歴であり、wtxがRunやDispatchの状態を解釈することはない。
-
 ## 冪等な準備
 
 ```bash
 wtx ensure NAME WORKDIR \
-  --owner orca \
   --json
 ```
 
@@ -34,7 +31,7 @@ wtx ensure NAME WORKDIR \
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "action": "created",
   "instance": {
     "name": "worker-a",
@@ -47,9 +44,6 @@ wtx ensure NAME WORKDIR \
       "branch": "feature-a",
       "head": "0123456789abcdef",
       "orphaned": false
-    },
-    "owner": {
-      "kind": "orca"
     },
     "ports": {}
   }
@@ -76,10 +70,10 @@ wtx exec --name NAME --tty -- <interactive-command>
 `worktree.created`のような事後eventだけに準備を委ねず、agent開始側がready receiptをbarrierとして扱う。
 失敗時はworktreeを残して理由を表示し、host Dockerへfallbackしない。
 
-- Orca: native setup hookで`wtx ensure "$ORCA_WORKTREE_PATH" --owner orca --json`を実行し、
+- Orca: native setup hookで`wtx ensure "$ORCA_WORKTREE_PATH" --json`を実行し、
   agent startup policyを`wait-for-setup`にする
 - Herdr: `worktree create`のJSONからworktree pathとroot paneを取得し、親agentが
-  `wtx ensure WORKTREE_PATH --owner herdr --json`を待ってから、そのpaneで`agent start`する
+  `wtx ensure WORKTREE_PATH --json`を待ってから、そのpaneで`agent start`する
 
 Orca/Herdrはagent、worktree、terminalを所有し続ける。wtxはagent開始やpane操作を行わない。
 

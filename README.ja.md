@@ -51,7 +51,7 @@ container依存testだけを`wtx exec`で実行する。Docker Desktopは不要�
   project固有設定が要らない
 - **Gitを直接共有：** VM内のcommitはhost branchへそのまま反映され、回収や同期の工程がない
 - **安定した自動化interface：** `ensure --json`と`inspect --json`がversion付きの
-  readiness・owner情報を返す
+  readiness情報を返す
 - **必要な機能を同梱：** 容量制限付きregistry cache、worktree専用iOS Simulator、
   project単位のTUI、Homebrew経由の1 command upgrade
 
@@ -152,7 +152,7 @@ flowchart LR
 taskとworktreeはorchestrator、runtimeだけをwtxが所有する。
 
 ```bash
-wtx ensure worker-a /abs/worktree --owner orca --json
+wtx ensure worker-a /abs/worktree --json
 wtx inspect worker-a --json
 wtx exec --name worker-a -w /abs/worktree -- docker compose up -d --wait
 ```
@@ -187,7 +187,7 @@ skillは`wtx`実行file自体を導入しないため、先にHomebrewでwtx本�
 - [コマンドリファレンス](docs/CLI.md)：全commandと自動化上の注意
 - [運用と制約](docs/OPERATIONS.md)：resource、cleanup、既知の制約、E2E検証
 - [信頼モデル](docs/TRUST-MODEL.md)：mountと資格情報の境界
-- [オーケストレータ連携契約](docs/DESIGN-orchestration.md)：readinessとowner schema
+- [オーケストレータ連携契約](docs/DESIGN-orchestration.md)：readinessとcleanup順序
 - [Simulator設計](docs/DESIGN-sim.md)：deviceとportの割り当て
 - [検証記録](VERIFICATION.md)：実VMでの実験と不採用案
 

@@ -17,7 +17,6 @@ mod util;
 
 use anyhow::{anyhow, Result};
 use clap::{CommandFactory, Parser, Subcommand};
-use std::collections::BTreeMap;
 use std::path::Path;
 
 #[derive(Parser)]
@@ -80,50 +79,6 @@ impl UpFlags {
     }
 }
 
-/// Orchestrator ownership metadata. wtx records provenance for cleanup, not task state.
-#[derive(clap::Args, Default)]
-struct OwnerFlags {
-    /// Owning orchestrator or actor, e.g. orca, herdr, manual
-    #[arg(long)]
-    owner: Option<String>,
-    /// Owner-scoped provenance label KEY=VALUE (repeatable)
-    #[arg(long = "owner-label", value_name = "KEY=VALUE")]
-    labels: Vec<String>,
-}
-
-impl OwnerFlags {
-    fn into_owner(self) -> Result<Option<lima::OwnerMeta>> {
-        let Some(kind) = self.owner else {
-            if self.labels.is_empty() {
-                return Ok(None);
-            }
-            return Err(anyhow!("--owner-label requires --owner"));
-        };
-        let kind = kind.trim();
-        if kind.is_empty() {
-            return Err(anyhow!("--owner must not be empty"));
-        }
-        let mut labels = BTreeMap::new();
-        for raw in self.labels {
-            let (key, value) = raw
-                .split_once('=')
-                .ok_or_else(|| anyhow!("owner label must be KEY=VALUE: {raw}"))?;
-            if key.is_empty() || value.is_empty() {
-                return Err(anyhow!(
-                    "owner label must have a non-empty key and value: {raw}"
-                ));
-            }
-            if labels.insert(key.to_string(), value.to_string()).is_some() {
-                return Err(anyhow!("duplicate owner label: {key}"));
-            }
-        }
-        Ok(Some(lima::OwnerMeta {
-            kind: kind.to_string(),
-            labels,
-        }))
-    }
-}
-
 #[derive(Subcommand)]
 enum Cmd {
     /// Create and start a VM (the host git is shared: commits in the VM land on the host)
@@ -149,8 +104,6 @@ enum Cmd {
         mounts: Vec<String>,
         #[command(flatten)]
         flags: UpFlags,
-        #[command(flatten)]
-        owner: OwnerFlags,
         /// Seconds to wait for dockerd after the VM starts
         #[arg(long, default_value_t = 120)]
         timeout_seconds: u64,
@@ -158,7 +111,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Inspect one wtx VM, its worktree, runtime readiness, ports, simulator, and owner
+    /// Inspect one wtx VM, its worktree, runtime readiness, ports, and simulator
     Inspect {
         /// VM name (omit inside a worktree covered by a wtx VM)
         name: Option<String>,
@@ -411,7 +364,6 @@ fn run() -> Result<()> {
             workdir,
             mounts,
             flags,
-            owner,
             timeout_seconds,
             json,
         }) => {
@@ -420,7 +372,6 @@ fn run() -> Result<()> {
                 &name,
                 &workdir,
                 flags.into_opts(mounts),
-                owner.into_owner()?,
                 timeout_seconds,
                 json,
             )
@@ -718,55 +669,18 @@ mod tests {
     }
 
     #[test]
-    fn owner_labels_are_structured_and_sorted() {
-        let owner = OwnerFlags {
-            owner: Some("orca".into()),
-            labels: vec!["task_id=task_1".into(), "run_id=run_1".into()],
-        }
-        .into_owner()
-        .unwrap()
-        .unwrap();
-        assert_eq!(owner.kind, "orca");
-        assert_eq!(owner.labels.get("run_id").unwrap(), "run_1");
-        assert_eq!(owner.labels.get("task_id").unwrap(), "task_1");
-    }
-
-    #[test]
-    fn owner_label_requires_owner() {
-        let err = OwnerFlags {
-            owner: None,
-            labels: vec!["run_id=run_1".into()],
-        }
-        .into_owner()
-        .unwrap_err();
-        assert!(err.to_string().contains("requires --owner"));
-    }
-
-    #[test]
     fn ensure_machine_contract_is_parsed() {
-        let cli = Cli::try_parse_from([
-            "wtx",
-            "ensure",
-            "vm-a",
-            "/tmp/worktree-a",
-            "--owner",
-            "orca",
-            "--owner-label",
-            "run_id=run_1",
-            "--json",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["wtx", "ensure", "vm-a", "/tmp/worktree-a", "--json"]).unwrap();
         match cli.cmd.unwrap() {
             Cmd::Ensure {
                 name,
                 workdir,
-                owner,
                 json,
                 ..
             } => {
                 assert_eq!(name.as_deref(), Some("vm-a"));
                 assert_eq!(workdir.as_deref(), Some("/tmp/worktree-a"));
-                assert_eq!(owner.owner.as_deref(), Some("orca"));
                 assert!(json);
             }
             _ => panic!("expected ensure"),

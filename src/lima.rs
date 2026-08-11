@@ -42,9 +42,6 @@ pub struct InstanceMeta {
     /// `wtx port add` mappings (label -> host/guest), used by `wtx env` to re-arm forwards.
     #[serde(default)]
     pub ports: std::collections::BTreeMap<String, PortMap>,
-    /// Ownership provenance for external orchestrator cleanup; this does not store task state.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner: Option<OwnerMeta>,
     /// Whether the VM was created with explicit access to `~/.claude` and the SSH agent.
     #[serde(default)]
     pub agent_access: bool,
@@ -57,20 +54,13 @@ struct GoldenReceipt {
     docker_version: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct OwnerMeta {
-    pub kind: String,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub labels: BTreeMap<String, String>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortMap {
     pub host: u16,
     pub guest: u16,
 }
 
-pub const RECEIPT_SCHEMA_VERSION: u32 = 1;
+pub const RECEIPT_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Serialize)]
 struct WorktreeInspection {
@@ -110,8 +100,6 @@ struct InstanceInspection {
     worktree: WorktreeInspection,
     #[serde(skip_serializing_if = "String::is_empty")]
     seeded_from: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    owner: Option<OwnerMeta>,
     #[serde(skip_serializing_if = "Option::is_none")]
     simulator: Option<SimulatorInspection>,
     ports: BTreeMap<String, PortInspection>,
@@ -717,7 +705,6 @@ fn up_inner(name: &str, workdir: &str, o: &UpOpts, quiet: bool) -> Result<()> {
         sim_udid: prev.sim_udid,
         sim_devicetype: prev.sim_devicetype,
         ports: prev.ports,
-        owner: prev.owner,
         agent_access: if existed {
             prev.agent_access
         } else {
@@ -836,7 +823,6 @@ pub fn ensure(
     name: &str,
     workdir: &str,
     mut o: UpOpts,
-    owner: Option<OwnerMeta>,
     timeout_seconds: u64,
     json: bool,
 ) -> Result<()> {
@@ -876,12 +862,6 @@ pub fn ensure(
     }
 
     up_inner(name, &workdir.to_string_lossy(), &o, json)?;
-
-    if let Some(owner) = owner {
-        let mut meta = load_meta(name).ok_or_else(|| anyhow!("metadata disappeared for {name}"))?;
-        meta.owner = Some(owner);
-        save_meta(name, &meta)?;
-    }
 
     crate::sshx::wait_docker_ready(name, Duration::from_secs(timeout_seconds))?;
     let instance = inspect_instance(name)?;
@@ -962,7 +942,6 @@ fn inspect_instance(name: &str) -> Result<InstanceInspection> {
             orphaned,
         },
         seeded_from: meta.seeded_from,
-        owner: meta.owner,
         simulator,
         ports,
         agent_access: meta.agent_access,
@@ -1004,12 +983,6 @@ pub fn inspect(name: Option<&str>, json: bool) -> Result<()> {
     );
     if !instance.seeded_from.is_empty() {
         println!("  seeded from: {}", instance.seeded_from);
-    }
-    if let Some(owner) = &instance.owner {
-        println!("  owner: {}", owner.kind);
-        for (key, value) in &owner.labels {
-            println!("    {key}={value}");
-        }
     }
     if let Some(sim) = &instance.simulator {
         println!(
@@ -1224,8 +1197,6 @@ pub fn ls_json() -> Result<()> {
         sim_udid: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         sim_state: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        owner: Option<OwnerMeta>,
     }
     let rows = list_instances();
     let sim_states = crate::sim::states_for(
@@ -1255,7 +1226,6 @@ pub fn ls_json() -> Result<()> {
             repo: i.repo,
             orphaned: i.orphaned,
             sim_udid: i.sim_udid,
-            owner: i.owner,
         })
         .collect();
     println!("{}", serde_json::to_string_pretty(&out)?);
@@ -1275,8 +1245,6 @@ pub struct Instance {
     pub orphaned: bool,
     /// Worktree-specific simulator UDID, empty if no simulator has been created.
     pub sim_udid: String,
-    /// Ownership provenance for an external orchestrator.
-    pub owner: Option<OwnerMeta>,
 }
 
 pub fn list_instances() -> Vec<Instance> {
@@ -1296,7 +1264,6 @@ pub fn list_instances() -> Vec<Instance> {
                     .as_ref()
                     .map(|m| m.sim_udid.clone())
                     .unwrap_or_default(),
-                owner: meta.as_ref().and_then(|m| m.owner.clone()),
                 repo: meta.map(|m| m.main_repo).unwrap_or_default(),
             })
         })
@@ -1555,7 +1522,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(receipt).unwrap(),
             serde_json::json!({
-                "schema_version": 1,
+                "schema_version": 2,
                 "action": "not_found",
                 "name": "vm-a",
             })
