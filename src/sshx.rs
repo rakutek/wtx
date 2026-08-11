@@ -9,7 +9,10 @@ use std::process::{Command, Stdio};
 fn ssh_base(name: &str) -> Vec<String> {
     vec![
         "-F".into(),
-        lima_dir(name).join("ssh.config").to_string_lossy().into_owned(),
+        lima_dir(name)
+            .join("ssh.config")
+            .to_string_lossy()
+            .into_owned(),
         "-o".into(),
         "ControlMaster=no".into(),
         "-o".into(),
@@ -25,7 +28,10 @@ pub fn vm_script(name: &str, script: &str, extra_stdin: Option<&[u8]>) -> Result
     args.push("bash".into());
     args.push("-s".into());
 
-    let mut child = Command::new("ssh").args(&args).stdin(Stdio::piped()).spawn()?;
+    let mut child = Command::new("ssh")
+        .args(&args)
+        .stdin(Stdio::piped())
+        .spawn()?;
     {
         let stdin = child.stdin.as_mut().ok_or_else(|| anyhow!("no stdin"))?;
         stdin.write_all(script.as_bytes())?;
@@ -51,7 +57,10 @@ pub fn capture(name: &str, remote: &str) -> Result<String> {
     args.push(format!("lima-{name}"));
     args.push("--".into());
     args.push(remote.to_string());
-    let out = Command::new("ssh").args(&args).stderr(Stdio::null()).output()?;
+    let out = Command::new("ssh")
+        .args(&args)
+        .stderr(Stdio::null())
+        .output()?;
     if !out.status.success() {
         return Err(anyhow!("remote command failed: {remote}"));
     }
@@ -129,7 +138,13 @@ pub fn master_alive(name: &str, host_port: u16) -> bool {
         return false;
     }
     Command::new("ssh")
-        .args(["-S", &sock.to_string_lossy(), "-O", "check", &format!("lima-{name}")])
+        .args([
+            "-S",
+            &sock.to_string_lossy(),
+            "-O",
+            "check",
+            &format!("lima-{name}"),
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -150,7 +165,13 @@ pub fn ensure_forward(name: &str, host: u16, guest: u16) -> Result<()> {
 pub fn drop_forward(name: &str, host_port: u16) {
     let sock = wtx_home().join(format!("{name}-{host_port}.sock"));
     let _ = Command::new("ssh")
-        .args(["-S", &sock.to_string_lossy(), "-O", "exit", &format!("lima-{name}")])
+        .args([
+            "-S",
+            &sock.to_string_lossy(),
+            "-O",
+            "exit",
+            &format!("lima-{name}"),
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -160,7 +181,13 @@ pub fn drop_forward(name: &str, host_port: u16) {
 pub fn unforward(name: &str, port: &str) -> Result<()> {
     let sock = wtx_home().join(format!("{name}-{port}.sock"));
     let _ = Command::new("ssh")
-        .args(["-S", &sock.to_string_lossy(), "-O", "exit", &format!("lima-{name}")])
+        .args([
+            "-S",
+            &sock.to_string_lossy(),
+            "-O",
+            "exit",
+            &format!("lima-{name}"),
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -173,10 +200,20 @@ pub fn close_all_forwards(name: &str) {
     if let Ok(rd) = std::fs::read_dir(wtx_home()) {
         for e in rd.flatten() {
             let p = e.path();
-            let fname = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            let fname = p
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
             if fname.starts_with(&format!("{name}-")) && fname.ends_with(".sock") {
                 let _ = Command::new("ssh")
-                    .args(["-S", &p.to_string_lossy(), "-O", "exit", &format!("lima-{name}")])
+                    .args([
+                        "-S",
+                        &p.to_string_lossy(),
+                        "-O",
+                        "exit",
+                        &format!("lima-{name}"),
+                    ])
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .status();

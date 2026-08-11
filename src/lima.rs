@@ -69,7 +69,12 @@ pub struct UpOpts {
 fn render_yaml(mounts: &[Mount], cpus: u32, memory: &str, disk: &str, path: &Path) -> Result<()> {
     let m: String = mounts
         .iter()
-        .map(|m| format!("- location: \"{}\"\n  writable: {}\n", m.location, m.writable))
+        .map(|m| {
+            format!(
+                "- location: \"{}\"\n  writable: {}\n",
+                m.location, m.writable
+            )
+        })
         .collect();
     let yaml = TEMPLATE
         .replace("__CPUS__", &cpus.to_string())
@@ -78,7 +83,10 @@ fn render_yaml(mounts: &[Mount], cpus: u32, memory: &str, disk: &str, path: &Pat
         .replace("__MOUNTS__", m.trim_end())
         .replace("__MIRROR_PORT__", &mirror::mirror_port().to_string())
         .replace("__GIT_NAME__", &git_config_global("user.name", "wtx"))
-        .replace("__GIT_EMAIL__", &git_config_global("user.email", "wtx@localhost"));
+        .replace(
+            "__GIT_EMAIL__",
+            &git_config_global("user.email", "wtx@localhost"),
+        );
     std::fs::write(path, yaml)?;
     Ok(())
 }
@@ -89,12 +97,20 @@ pub fn golden_usable() -> bool {
 
 pub fn image_build() -> Result<()> {
     if lima_dir(GOLDEN).exists() {
-        return Err(anyhow!("{GOLDEN} already exists (run `wtx image rm` to rebuild it)"));
+        return Err(anyhow!(
+            "{GOLDEN} already exists (run `wtx image rm` to rebuild it)"
+        ));
     }
     let yaml = wtx_home().join(format!("{GOLDEN}.yaml"));
     render_yaml(&[], 2, "4GiB", "20GiB", &yaml)?;
     println!("Building the golden VM (one-time, 3-4 min)...");
-    limactl(&["start", "--name", GOLDEN, "--tty=false", &yaml.to_string_lossy()])?;
+    limactl(&[
+        "start",
+        "--name",
+        GOLDEN,
+        "--tty=false",
+        &yaml.to_string_lossy(),
+    ])?;
     limactl(&["stop", GOLDEN])?; // clone は停止中のインスタンスに対して行う
     println!("Done: `wtx up` now clones {GOLDEN}");
     Ok(())
@@ -156,7 +172,9 @@ fn compose_project_name(dir: &Path) -> String {
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
         .collect();
-    cleaned.trim_start_matches(|c: char| !c.is_ascii_alphanumeric()).to_string()
+    cleaned
+        .trim_start_matches(|c: char| !c.is_ascii_alphanumeric())
+        .to_string()
 }
 
 /// `--from` で clone したVMから clone 元由来の状態を取り除き、compose の volume 名を
@@ -277,7 +295,10 @@ pub fn up(name: &str, workdir: &str, o: UpOpts) -> Result<()> {
                 writable: true,
             });
         } else {
-            eprintln!("wtx: warning: {} not found; claude runs unauthenticated", host_claude.display());
+            eprintln!(
+                "wtx: warning: {} not found; claude runs unauthenticated",
+                host_claude.display()
+            );
         }
     }
     for m in &o.extra_mounts {
@@ -290,11 +311,20 @@ pub fn up(name: &str, workdir: &str, o: UpOpts) -> Result<()> {
             eprintln!("wtx: ignoring {abs}: already mounted automatically");
             continue;
         }
-        mounts.push(Mount { location: abs, writable: w });
+        mounts.push(Mount {
+            location: abs,
+            writable: w,
+        });
     }
 
     let yaml = wtx_home().join(format!("{name}.yaml"));
-    render_yaml(&mounts, o.cpus.unwrap_or(2), o.memory.as_deref().unwrap_or("4GiB"), &o.disk, &yaml)?;
+    render_yaml(
+        &mounts,
+        o.cpus.unwrap_or(2),
+        o.memory.as_deref().unwrap_or("4GiB"),
+        &o.disk,
+        &yaml,
+    )?;
 
     let status = lima_status(name);
     let existed = !status.is_empty();
@@ -302,7 +332,9 @@ pub fn up(name: &str, workdir: &str, o: UpOpts) -> Result<()> {
         // 既存VMを clone して DB（volume）・イメージ・導入済みツールごと引き継ぐ。
         // 停止中のディスクを複製するので at-rest の一貫したコピーになる。
         if !status.is_empty() {
-            return Err(anyhow!("{name} already exists; --from can only seed a new VM"));
+            return Err(anyhow!(
+                "{name} already exists; --from can only seed a new VM"
+            ));
         }
         if src == name {
             return Err(anyhow!("--from {src}: cannot seed a VM from itself"));
@@ -341,7 +373,13 @@ pub fn up(name: &str, workdir: &str, o: UpOpts) -> Result<()> {
         if !o.no_clone {
             eprintln!("wtx: hint: `wtx image build` makes later VM creation take seconds");
         }
-        limactl(&["start", "--name", name, "--tty=false", &yaml.to_string_lossy()])?;
+        limactl(&[
+            "start",
+            "--name",
+            name,
+            "--tty=false",
+            &yaml.to_string_lossy(),
+        ])?;
     }
 
     // 再アタッチではシミュレータ・ポート割り当てを引き継ぐ（メタは毎回書き直すため）。
@@ -360,7 +398,10 @@ pub fn up(name: &str, workdir: &str, o: UpOpts) -> Result<()> {
         // 旧バージョンのwtxが作ったVMは隔離gitオーバーレイが生きていて、
         // コミットがVMローカルに落ちたままホストに現れない。作り直しを促す。
         if existed && o.from.is_none() {
-            let marker = format!("test -e {}/.wtx-local && echo legacy || true", shq(&r.host_git.to_string_lossy()));
+            let marker = format!(
+                "test -e {}/.wtx-local && echo legacy || true",
+                shq(&r.host_git.to_string_lossy())
+            );
             if let Ok(out) = crate::sshx::capture(name, &marker) {
                 if out.contains("legacy") {
                     eprintln!(
@@ -444,11 +485,16 @@ pub fn rm(name: &str, with_worktree: bool) -> Result<()> {
 
     if with_worktree {
         let Some(m) = meta else {
-            return Err(anyhow!("no metadata for {name}; cannot locate the worktree"));
+            return Err(anyhow!(
+                "no metadata for {name}; cannot locate the worktree"
+            ));
         };
         // linked worktree のときだけ畳む。通常リポジトリで消すと本体を消してしまう。
         if m.main_repo.is_empty() || m.main_repo == m.workdir {
-            eprintln!("wtx: {name} is not a linked worktree; left {} in place", m.workdir);
+            eprintln!(
+                "wtx: {name} is not a linked worktree; left {} in place",
+                m.workdir
+            );
         } else if !Path::new(&m.workdir).exists() {
             eprintln!("wtx: worktree {} is already gone", m.workdir);
         } else {
@@ -460,7 +506,10 @@ pub fn rm(name: &str, with_worktree: bool) -> Result<()> {
             if st.success() {
                 println!("removed worktree {}", m.workdir);
             } else {
-                eprintln!("wtx: could not remove worktree {} (remove it manually)", m.workdir);
+                eprintln!(
+                    "wtx: could not remove worktree {} (remove it manually)",
+                    m.workdir
+                );
             }
         }
     }
@@ -470,7 +519,10 @@ pub fn rm(name: &str, with_worktree: bool) -> Result<()> {
 /// worktree が消えた（孤児）VM を掃除する。コミットはホストの .git に直接刻まれている
 /// ので、VMを消しても作業が失われることはない。
 pub fn prune(yes: bool) -> Result<()> {
-    let orphans: Vec<Instance> = list_instances().into_iter().filter(|i| i.orphaned).collect();
+    let orphans: Vec<Instance> = list_instances()
+        .into_iter()
+        .filter(|i| i.orphaned)
+        .collect();
     if orphans.is_empty() {
         println!("no orphaned VMs");
         return Ok(());
@@ -506,14 +558,25 @@ pub fn ls() {
     );
     // シミュレータ状態は sim を使うVMがあるときだけ問い合わせる（xcrun 無し環境を巻き込まない）
     let sim_states = crate::sim::states_for(
-        &rows.iter().filter(|i| !i.sim_udid.is_empty()).map(|i| i.sim_udid.clone()).collect::<Vec<_>>(),
+        &rows
+            .iter()
+            .filter(|i| !i.sim_udid.is_empty())
+            .map(|i| i.sim_udid.clone())
+            .collect::<Vec<_>>(),
     );
     for i in &rows {
-        let orphan = if i.orphaned { "  (orphaned: workdir gone)" } else { "" };
+        let orphan = if i.orphaned {
+            "  (orphaned: workdir gone)"
+        } else {
+            ""
+        };
         let sim = if i.sim_udid.is_empty() {
             String::new()
         } else {
-            let st = sim_states.get(&i.sim_udid).map(String::as_str).unwrap_or("missing");
+            let st = sim_states
+                .get(&i.sim_udid)
+                .map(String::as_str)
+                .unwrap_or("missing");
             format!("  sim:{st}")
         };
         println!(
@@ -529,6 +592,55 @@ pub fn ls() {
     if rows.iter().any(|i| i.orphaned) {
         println!("\norphaned VMs can be cleaned up with `wtx prune`");
     }
+}
+
+/// `wtx ls --json`: エージェント・スクリプト向けの機械可読出力。
+pub fn ls_json() -> Result<()> {
+    #[derive(Serialize)]
+    struct Row {
+        name: String,
+        status: String,
+        branch: String,
+        workdir: String,
+        repo: String,
+        orphaned: bool,
+        #[serde(skip_serializing_if = "String::is_empty")]
+        sim_udid: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sim_state: Option<String>,
+    }
+    let rows = list_instances();
+    let sim_states = crate::sim::states_for(
+        &rows
+            .iter()
+            .filter(|i| !i.sim_udid.is_empty())
+            .map(|i| i.sim_udid.clone())
+            .collect::<Vec<_>>(),
+    );
+    let out: Vec<Row> = rows
+        .into_iter()
+        .map(|i| Row {
+            sim_state: if i.sim_udid.is_empty() {
+                None
+            } else {
+                Some(
+                    sim_states
+                        .get(&i.sim_udid)
+                        .cloned()
+                        .unwrap_or_else(|| "missing".to_string()),
+                )
+            },
+            name: i.name,
+            status: i.status,
+            branch: i.branch,
+            workdir: i.workdir,
+            repo: i.repo,
+            orphaned: i.orphaned,
+            sim_udid: i.sim_udid,
+        })
+        .collect();
+    println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
 }
 
 /// TUI 用のインスタンス一覧。
@@ -559,9 +671,116 @@ pub fn list_instances() -> Vec<Instance> {
                 orphaned: !workdir.is_empty() && !Path::new(&workdir).exists(),
                 workdir: meta.as_ref().map(|m| m.workdir.clone()).unwrap_or_default(),
                 branch: meta.as_ref().map(|m| m.branch.clone()).unwrap_or_default(),
-                sim_udid: meta.as_ref().map(|m| m.sim_udid.clone()).unwrap_or_default(),
+                sim_udid: meta
+                    .as_ref()
+                    .map(|m| m.sim_udid.clone())
+                    .unwrap_or_default(),
                 repo: meta.map(|m| m.main_repo).unwrap_or_default(),
             })
         })
         .collect()
+}
+
+/// VM名をディレクトリ名から作る（Limaのインスタンス名に使える文字だけ残す）。
+pub fn derive_name(dir: &Path) -> Result<String> {
+    let base = dir
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let cleaned: String = base
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let cleaned = cleaned
+        .trim_matches(|c: char| !c.is_ascii_alphanumeric())
+        .to_string();
+    if cleaned.is_empty() {
+        return Err(anyhow!(
+            "cannot derive a VM name from {}; pass NAME explicitly",
+            dir.display()
+        ));
+    }
+    Ok(cleaned)
+}
+
+/// 導出した名前が別の workdir のVMに既に使われていたら失敗させる。
+/// 黙って再アタッチすると、そのVMの workdir 記録を書き換えた上に
+/// マウントは旧worktreeのままという壊れた状態を作ってしまう。
+pub fn ensure_name_matches(name: &str, dir: &Path) -> Result<()> {
+    if let Some(m) = load_meta(name) {
+        if !m.workdir.is_empty() && Path::new(&m.workdir) != dir {
+            return Err(anyhow!(
+                "VM {name} already exists for {}; pass a different NAME",
+                m.workdir
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `wtx new BRANCH`: worktree とVMを一度に作る。ブランチが無ければ現在の HEAD から作る。
+pub fn new(branch: &str, dir: Option<&str>, o: UpOpts) -> Result<()> {
+    let cwd = std::fs::canonicalize(std::env::current_dir()?)?;
+    let repo = repo::inspect_repo(&cwd)?.ok_or_else(|| anyhow!("not inside a git repository"))?;
+    let main_repo = repo.host_repo;
+    let dirpath = match dir {
+        // git は相対パスをリポジトリ基準で解決するので、先にカレント基準で絶対化する
+        Some(d) => {
+            let p = Path::new(d);
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                std::env::current_dir()?.join(p)
+            }
+        }
+        None => {
+            let repo_name = main_repo
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            main_repo
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join(format!("{repo_name}-{}", branch.replace('/', "-")))
+        }
+    };
+    if dirpath.exists() {
+        return Err(anyhow!("{} already exists", dirpath.display()));
+    }
+    // VM名の衝突は worktree を作る前に検査する（作った後に失敗すると片付けが残る）
+    let name = derive_name(&dirpath)?;
+    ensure_name_matches(&name, &dirpath)?;
+
+    let branch_ref = format!("refs/heads/{branch}");
+    let exists = git_run(
+        &main_repo,
+        &["show-ref", "--verify", "--quiet", &branch_ref],
+    )
+    .is_ok();
+    let dirstr = dirpath.to_string_lossy().into_owned();
+    let mut args: Vec<&str> = vec!["worktree", "add"];
+    if exists {
+        args.push(&dirstr);
+        args.push(branch);
+    } else {
+        args.push("-b");
+        args.push(branch);
+        args.push(&dirstr);
+    }
+    // git の出力はそのまま見せる（ブランチが他の worktree で checkout 済み等のエラーのため）
+    let st = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&main_repo)
+        .args(&args)
+        .status()?;
+    if !st.success() {
+        return Err(anyhow!("git worktree add failed"));
+    }
+    up(&name, &dirstr, o)
 }

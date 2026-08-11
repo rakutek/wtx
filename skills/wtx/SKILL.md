@@ -53,12 +53,14 @@ wtx image build                # ゴールデンVM構築（3〜4分）
 ## 基本フロー
 
 ```bash
-wtx up NAME ~/repos/worktree-dir       # VM作成・起動（worktree自動判別、gitはホストと共有）
-wtx up NAME2 ~/repos/dir2 --from NAME  # 既存VMからDB(volume)・イメージごと引き継いで作成
+wtx new BRANCH                         # worktree + VM を一発で作成（repo内から実行。ブランチが無ければ作る）
+wtx new BRANCH --from NAME             # 既存VMからDB(volume)・イメージごと引き継いで作成
+wtx up                                 # worktree内で引数なし: そのworktreeのVMを解決して作成/起動
+wtx up NAME ~/repos/worktree-dir       # 明示形（worktree自動判別、gitはホストと共有）
 wtx exec NAME -w ~/repos/worktree-dir docker compose up -d --wait
 wtx shell NAME                         # 対話シェル（中で claude も使える）
 wtx rm NAME [--with-worktree]          # VM削除（DB・イメージごと消える。コミットはホストに残る）
-wtx ls                                 # 一覧（worktreeが消えたVMは orphaned と表示）
+wtx ls --json                          # 一覧（機械可読。worktreeが消えたVMは orphaned 扱い）
 wtx prune --yes                        # 孤児VMを掃除
 wtx                                    # 引数なしで ratatui コンソール
 ```

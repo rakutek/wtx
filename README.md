@@ -10,6 +10,7 @@ while every commit they make lands directly on your host branch.
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Platform: macOS on Apple Silicon](https://img.shields.io/badge/platform-macOS%20on%20Apple%20Silicon-black.svg?logo=apple)](#requirements)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg?logo=rust)](Cargo.toml)
+[![CI](https://github.com/rakutek/wtx/actions/workflows/ci.yml/badge.svg)](https://github.com/rakutek/wtx/actions/workflows/ci.yml)
 
 English | [日本語](README.ja.md)
 
@@ -68,20 +69,19 @@ the host branch itself, and `git push` and `claude` just work. No Docker Desktop
 ## Requirements
 
 - macOS on Apple Silicon (wtx uses vz, the Apple Virtualization.framework backend)
-- [Lima](https://lima-vm.io/) — `brew install lima`
+- [Lima](https://lima-vm.io/) (installed automatically by the Homebrew formula)
 - A Rust toolchain, to build from source
 - Xcode, only if you use `wtx sim`
 
 ## Install
 
 ```bash
-brew install lima
-cargo install --git https://github.com/rakutek/wtx wtx
+brew install rakutek/tap/wtx
 ```
 
 > [!NOTE]
-> The `wtx` crate on crates.io is an unrelated project — install from git as above,
-> or clone this repo and run `cargo install --path .`.
+> The `wtx` crate on crates.io is an unrelated project. To build from source, clone this
+> repository and run `cargo install --path .`; install Lima separately with `brew install lima`.
 
 ## Quick start
 
@@ -90,17 +90,16 @@ wtx image build       # one-time: build the golden VM (3–4 min)
 wtx mirror install    # optional: registry cache (launchd on-demand, no daemon)
 
 # a worktree per branch, a VM per worktree — each with its own dockerd, DBs, and ports
-git -C ~/repos/myapp worktree add ~/repos/myapp-a feature-a
-wtx up myapp-a ~/repos/myapp-a
-wtx exec myapp-a -w ~/repos/myapp-a docker compose up -d --wait
+cd ~/repos/myapp
+wtx new feature-a     # git worktree add ../myapp-feature-a + its VM, in one step (~8 s)
+wtx exec myapp-feature-a -w ~/repos/myapp-feature-a docker compose up -d --wait
 
 # a second worktree, seeded from the first: DB data, images, and tools carry over
-git -C ~/repos/myapp worktree add ~/repos/myapp-b feature-b
-wtx up myapp-b ~/repos/myapp-b --from myapp-a
+wtx new feature-b --from myapp-feature-a
 
-wtx shell myapp-a     # claude works inside — config and auth are shared with the host
-wtx rm myapp-a --with-worktree   # tear down the VM and its linked worktree together
-wtx ls                # lists VMs, flags orphans whose worktree is gone
+wtx shell myapp-feature-a              # claude works inside — config and auth are shared with the host
+wtx rm myapp-feature-a --with-worktree # tear down the VM and its linked worktree together
+wtx ls                # lists VMs, flags orphans whose worktree is gone (--json for scripts)
 wtx prune --yes       # clean up orphaned VMs
 wtx                   # no args: the TUI console
 ```
@@ -240,11 +239,12 @@ there is no collection step. The evaluation notes are in
 
 | Command | What it does |
 |---|---|
-| `wtx up NAME [DIR]` | Create and start a VM for an existing worktree (clones the golden VM, ~8 s) |
+| `wtx new BRANCH [--dir DIR]` | Create a git worktree and its VM in one step (the branch is created if missing; `--from`, `--sim` etc. apply) |
+| `wtx up [NAME] [DIR]` | Create/start a VM for an existing worktree; with no args, resolves from the current directory (clones the golden VM, ~8 s) |
 | `wtx up NAME DIR --from SRC` | Seed from an existing VM: volumes, images, tools carry over |
 | `wtx exec NAME [-w DIR] CMD…` | Run a command in the VM; exit code passes through |
 | `wtx shell NAME` | Interactive shell inside the VM |
-| `wtx ls` | List VMs; flags orphans whose worktree is gone |
+| `wtx ls [--json]` | List VMs; flags orphans whose worktree is gone |
 | `wtx` / `wtx tui` | TUI console (`--snapshot` for a single ttyless frame) |
 | `wtx forward NAME HOST:GUEST` | Publish a VM port on the host (ssh -L) |
 | `wtx bridge NAME GUEST:HOST` | Expose a host port inside the VM (ssh -R) |
@@ -255,6 +255,7 @@ there is no collection step. The evaluation notes are in
 | `wtx image build\|rm\|status` | Manage the golden VM |
 | `wtx mirror install\|uninstall\|up\|down\|status` | Manage the registry cache |
 | `wtx which` | Print the VM name for the current worktree (composable) |
+| `wtx completions SHELL` | Print shell completions (bash, zsh, fish, elvish, powershell) |
 | `wtx sim create\|status\|wire\|env\|rm` | Per-worktree iOS simulator |
 
 ## Working with orchestrators and agents

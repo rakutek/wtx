@@ -10,6 +10,7 @@
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#ライセンス)
 [![Platform: macOS on Apple Silicon](https://img.shields.io/badge/platform-macOS%20on%20Apple%20Silicon-black.svg?logo=apple)](#動作環境)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg?logo=rust)](Cargo.toml)
+[![CI](https://github.com/rakutek/wtx/actions/workflows/ci.yml/badge.svg)](https://github.com/rakutek/wtx/actions/workflows/ci.yml)
 
 [English](README.md) | 日本語
 
@@ -61,20 +62,20 @@ Docker Desktop は不要。
 ## 動作環境
 
 - Apple Silicon の macOS（vz、つまり Apple Virtualization.framework を使う）
-- [Lima](https://lima-vm.io/)：`brew install lima`
+- [Lima](https://lima-vm.io/)（Homebrew formula が自動でインストールする）
 - ソースからビルドするための Rust ツールチェイン
 - Xcode（`wtx sim` を使う場合のみ）
 
 ## インストール
 
 ```bash
-brew install lima
-cargo install --git https://github.com/rakutek/wtx wtx
+brew install rakutek/tap/wtx
 ```
 
 > [!NOTE]
 > crates.io の `wtx` クレートは無関係の別プロジェクト。
-> 上記のように git からインストールするか、このリポジトリを clone して `cargo install --path .` を実行する。
+> ソースからビルドする場合は、このリポジトリを clone して `cargo install --path .` を実行し、
+> Lima は `brew install lima` で別途インストールする。
 
 ## クイックスタート
 
@@ -83,17 +84,16 @@ wtx image build       # 初回のみ: ゴールデンVMを構築（3〜4分）
 wtx mirror install    # 任意: レジストリキャッシュ（launchdオンデマンド、常駐なし）
 
 # ブランチごとにworktreeを切り、worktreeごとに1 VM。それぞれが自分のdockerd、DB、ポートを持つ
-git -C ~/repos/myapp worktree add ~/repos/myapp-a feature-a
-wtx up myapp-a ~/repos/myapp-a
-wtx exec myapp-a -w ~/repos/myapp-a docker compose up -d --wait
+cd ~/repos/myapp
+wtx new feature-a     # git worktree add ../myapp-feature-a とVM作成を一発で（約8秒）
+wtx exec myapp-feature-a -w ~/repos/myapp-feature-a docker compose up -d --wait
 
 # 2本目のworktreeは1本目のVMから引き継ぐ: DBデータ、イメージ、ツールが乗り移る
-git -C ~/repos/myapp worktree add ~/repos/myapp-b feature-b
-wtx up myapp-b ~/repos/myapp-b --from myapp-a
+wtx new feature-b --from myapp-feature-a
 
-wtx shell myapp-a     # 中でclaudeが使える（設定と認証はホストと共有）
-wtx rm myapp-a --with-worktree   # VMとlinked worktreeをまとめて片付ける
-wtx ls                # VM一覧（worktree消失の孤児VMも表示）
+wtx shell myapp-feature-a              # 中でclaudeが使える（設定と認証はホストと共有）
+wtx rm myapp-feature-a --with-worktree # VMとlinked worktreeをまとめて片付ける
+wtx ls                # VM一覧（worktree消失の孤児VMも表示。--json で機械可読）
 wtx prune --yes       # 孤児VMを掃除
 wtx                   # 引数なしでTUIコンソール
 ```
@@ -208,11 +208,12 @@ wtx は OSS スタック（Lima）でアカウント不要、ホストの `.git`
 
 | コマンド | 内容 |
 |---|---|
-| `wtx up NAME [DIR]` | 既存 worktree に VM を作成して起動（ゴールデン VM を clone、約8秒） |
+| `wtx new BRANCH [--dir DIR]` | worktree と VM を一発で作成（ブランチが無ければ作る。`--from` や `--sim` も使える） |
+| `wtx up [NAME] [DIR]` | 既存 worktree に VM を作成して起動。引数なしはカレントディレクトリから解決（ゴールデン VM を clone、約8秒） |
 | `wtx up NAME DIR --from SRC` | 既存 VM から引き継いで作成（volume、イメージ、ツールが乗り移る） |
 | `wtx exec NAME [-w DIR] CMD…` | VM 内でコマンド実行（終了コードは素通し） |
 | `wtx shell NAME` | VM 内の対話シェル |
-| `wtx ls` | VM 一覧（worktree 消失の孤児 VM も表示） |
+| `wtx ls [--json]` | VM 一覧（worktree 消失の孤児 VM も表示） |
 | `wtx` / `wtx tui` | TUI コンソール（`--snapshot` で tty なし1フレーム描画） |
 | `wtx forward NAME HOST:GUEST` | VM のポートをホストへ公開（ssh -L） |
 | `wtx bridge NAME GUEST:HOST` | ホストのポートを VM 内へ届ける（ssh -R） |
@@ -223,6 +224,7 @@ wtx は OSS スタック（Lima）でアカウント不要、ホストの `.git`
 | `wtx image build\|rm\|status` | ゴールデン VM の管理 |
 | `wtx mirror install\|uninstall\|up\|down\|status` | レジストリキャッシュの管理 |
 | `wtx which` | カレント worktree の VM 名を表示（他コマンドと組み合わせ可） |
+| `wtx completions SHELL` | シェル補完を出力（bash, zsh, fish など） |
 | `wtx sim create\|status\|wire\|env\|rm` | worktree 専用 iOS シミュレータ |
 
 ## オーケストレータ（Orca 等）との連携方針

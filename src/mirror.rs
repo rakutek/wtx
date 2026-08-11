@@ -15,7 +15,7 @@ use axum::routing::get;
 use axum::Router;
 use serde::Deserialize;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -23,7 +23,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub static LAST_ACTIVITY: AtomicI64 = AtomicI64::new(0);
 
 fn now() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
 }
 
 #[derive(Debug, Clone)]
@@ -117,10 +120,17 @@ async fn fetch_token(st: &AppState, challenge: &str) -> Option<String> {
         }
     }
     let realm = params.remove("realm")?;
-    let query: Vec<(String, String)> = params.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+    let query: Vec<(String, String)> = params
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
     let resp = st.http.get(&realm).query(&query).send().await.ok()?;
     let t: TokenResp = resp.json().await.ok()?;
-    let tok = if t.token.is_empty() { t.access_token } else { t.token };
+    let tok = if t.token.is_empty() {
+        t.access_token
+    } else {
+        t.token
+    };
     if tok.is_empty() {
         None
     } else {
@@ -166,7 +176,7 @@ async fn upstream_get(
     Err(anyhow!("unreachable"))
 }
 
-fn blob_path(cache: &PathBuf, digest: &str) -> Option<PathBuf> {
+fn blob_path(cache: &Path, digest: &str) -> Option<PathBuf> {
     let (algo, hex) = digest.split_once(':')?;
     if !hex.chars().all(|c| c.is_ascii_alphanumeric()) || hex.len() < 8 {
         return None;
@@ -184,7 +194,10 @@ async fn handle_blob(
         None => return (StatusCode::BAD_REQUEST, "bad digest").into_response(),
     };
     if let Ok(data) = tokio::fs::read(&path).await {
-        return ([(axum::http::header::CONTENT_TYPE, "application/octet-stream")], data)
+        return (
+            [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+            data,
+        )
             .into_response();
     }
     let resp = match upstream_get(&st, &format!("/v2/{name}/blobs/{digest}"), None, false).await {
@@ -192,7 +205,10 @@ async fn handle_blob(
         Err(e) => return (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
     };
     if !resp.status().is_success() {
-        return (StatusCode::from_u16(resp.status().as_u16()).unwrap(), "upstream error")
+        return (
+            StatusCode::from_u16(resp.status().as_u16()).unwrap(),
+            "upstream error",
+        )
             .into_response();
     }
     let body = match resp.bytes().await {
@@ -206,7 +222,11 @@ async fn handle_blob(
     if tokio::fs::write(&tmp, &body).await.is_ok() {
         let _ = tokio::fs::rename(&tmp, &path).await;
     }
-    ([(axum::http::header::CONTENT_TYPE, "application/octet-stream")], body).into_response()
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+        body,
+    )
+        .into_response()
 }
 
 /// manifest は tag が動くので常に上流に問い合わせる（キャッシュしない）。
@@ -217,7 +237,13 @@ async fn handle_manifest(
 ) -> Response {
     LAST_ACTIVITY.store(now(), Ordering::Relaxed);
     let accept = headers.get(axum::http::header::ACCEPT).cloned();
-    let resp = match upstream_get(&st, &format!("/v2/{name}/manifests/{reference}"), accept.as_ref(), false).await
+    let resp = match upstream_get(
+        &st,
+        &format!("/v2/{name}/manifests/{reference}"),
+        accept.as_ref(),
+        false,
+    )
+    .await
     {
         Ok(r) => r,
         Err(e) => return (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
@@ -226,7 +252,10 @@ async fn handle_manifest(
     let mut out = Response::builder().status(status);
     for h in ["content-type", "docker-content-digest", "etag"] {
         if let Some(v) = resp.headers().get(h) {
-            if let (Ok(n), Ok(v)) = (HeaderName::try_from(h), HeaderValue::from_bytes(v.as_bytes())) {
+            if let (Ok(n), Ok(v)) = (
+                HeaderName::try_from(h),
+                HeaderValue::from_bytes(v.as_bytes()),
+            ) {
                 out = out.header(n, v);
             }
         }

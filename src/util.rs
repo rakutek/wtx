@@ -9,7 +9,10 @@ pub fn wtx_home() -> PathBuf {
 }
 
 pub fn lima_dir(name: &str) -> PathBuf {
-    dirs::home_dir().unwrap_or_default().join(".lima").join(name)
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".lima")
+        .join(name)
 }
 
 /// シェルに渡す文字列を安全にクォートする。
@@ -34,7 +37,10 @@ pub fn limactl(args: &[&str]) -> Result<()> {
 /// 出力を継承せずに実行する limactl。TUIのバックグラウンド操作から呼んでも
 /// 画面を汚さない。失敗時は stderr の最後の非空行をエラーとして返す。
 pub fn limactl_capture(args: &[&str]) -> std::result::Result<(), String> {
-    let out = Command::new("limactl").args(args).output().map_err(|e| e.to_string())?;
+    let out = Command::new("limactl")
+        .args(args)
+        .output()
+        .map_err(|e| e.to_string())?;
     if out.status.success() {
         return Ok(());
     }

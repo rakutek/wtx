@@ -1,6 +1,6 @@
 [package]
 name = "wtx"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 authors = ["Raku Sakaguchi <rakutek12@gmail.com>"]
 description = "worktree×コーディングエージェント並列開発ツール: worktreeごとの独立VM (Lima/vz) + VM内dockerd、--fromでDB・イメージごと環境を引き継ぐ"
@@ -10,6 +10,7 @@ repository = "https://github.com/rakutek/wtx"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "io-util", "time"] }

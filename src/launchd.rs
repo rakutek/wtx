@@ -10,7 +10,11 @@ use std::path::PathBuf;
 use std::process::Command;
 
 extern "C" {
-    fn launch_activate_socket(name: *const libc::c_char, fds: *mut *mut libc::c_int, cnt: *mut libc::size_t) -> libc::c_int;
+    fn launch_activate_socket(
+        name: *const libc::c_char,
+        fds: *mut *mut libc::c_int,
+        cnt: *mut libc::size_t,
+    ) -> libc::c_int;
 }
 
 const LABEL: &str = "com.wtx.mirror";

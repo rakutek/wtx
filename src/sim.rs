@@ -11,10 +11,9 @@ use std::collections::BTreeMap;
 use std::process::Command;
 
 fn xcrun(args: &[&str]) -> Result<String> {
-    let out = Command::new("xcrun")
-        .args(args)
-        .output()
-        .map_err(|_| anyhow!("xcrun not found (simulator support needs Xcode command line tools)"))?;
+    let out = Command::new("xcrun").args(args).output().map_err(|_| {
+        anyhow!("xcrun not found (simulator support needs Xcode command line tools)")
+    })?;
     if !out.status.success() {
         return Err(anyhow!(
             "xcrun {} failed: {}",
@@ -26,12 +25,16 @@ fn xcrun(args: &[&str]) -> Result<String> {
 }
 
 fn simctl_json(kind: &str) -> Result<Value> {
-    Ok(serde_json::from_str(&xcrun(&["simctl", "list", "-j", kind])?)?)
+    Ok(serde_json::from_str(&xcrun(&[
+        "simctl", "list", "-j", kind,
+    ])?)?)
 }
 
 /// ~/.wtx の全メタデータ（mirrors.json 等は workdir を持たないので自然に除外される）。
 fn all_metas() -> Vec<(String, InstanceMeta)> {
-    let Ok(rd) = std::fs::read_dir(wtx_home()) else { return vec![] };
+    let Ok(rd) = std::fs::read_dir(wtx_home()) else {
+        return vec![];
+    };
     rd.flatten()
         .filter_map(|e| {
             let p = e.path();
@@ -48,15 +51,9 @@ fn all_metas() -> Vec<(String, InstanceMeta)> {
         .collect()
 }
 
-/// NAME 省略時にカレントディレクトリから VM を解決する。
-/// メタデータの workdir との最長前方一致。同じ workdir を持つVMが複数ある場合は
-/// 推測せず候補を列挙してエラーにする。
-pub fn resolve(explicit: Option<&str>) -> Result<(String, InstanceMeta)> {
-    if let Some(n) = explicit {
-        let meta =
-            lima::load_meta(n).ok_or_else(|| anyhow!("no metadata for {n} (is it a wtx VM?)"))?;
-        return Ok((n.to_string(), meta));
-    }
+/// カレントディレクトリを workdir に含むVM（メタデータ workdir の最長前方一致）。
+/// 同率で複数マッチした場合は全候補を返す（呼び出し側が推測せずエラーにする）。
+pub fn covering_cwd() -> Result<Vec<(String, InstanceMeta)>> {
     let cwd = std::fs::canonicalize(std::env::current_dir()?)?;
     let cwd = cwd.to_string_lossy().into_owned();
     let mut best: Vec<(String, InstanceMeta)> = vec![];
@@ -73,14 +70,30 @@ pub fn resolve(explicit: Option<&str>) -> Result<(String, InstanceMeta)> {
             best.push((name, meta));
         }
     }
+    Ok(best)
+}
+
+/// NAME 省略時にカレントディレクトリから VM を解決する。
+/// 同じ workdir を持つVMが複数ある場合は推測せず候補を列挙してエラーにする。
+pub fn resolve(explicit: Option<&str>) -> Result<(String, InstanceMeta)> {
+    if let Some(n) = explicit {
+        let meta =
+            lima::load_meta(n).ok_or_else(|| anyhow!("no metadata for {n} (is it a wtx VM?)"))?;
+        return Ok((n.to_string(), meta));
+    }
+    let mut best = covering_cwd()?;
     match best.len() {
         0 => Err(anyhow!(
-            "no wtx VM covers {cwd} (run inside a worktree that has one, or pass NAME)"
+            "no wtx VM covers {} (run inside a worktree that has one, or pass NAME)",
+            std::env::current_dir()?.display()
         )),
         1 => Ok(best.remove(0)),
         _ => Err(anyhow!(
             "multiple VMs cover this directory: {} (pass NAME)",
-            best.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ")
+            best.iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         )),
     }
 }
@@ -101,11 +114,22 @@ fn newest_ios_runtime() -> Result<Value> {
         .into_iter()
         .filter(|r| {
             r["isAvailable"].as_bool() == Some(true)
-                && r["identifier"].as_str().unwrap_or("").contains("SimRuntime.iOS")
+                && r["identifier"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("SimRuntime.iOS")
         })
         .max_by_key(|r| {
-            let mut it = r["version"].as_str().unwrap_or("0").split('.').map(|x| x.parse::<u64>().unwrap_or(0));
-            (it.next().unwrap_or(0), it.next().unwrap_or(0), it.next().unwrap_or(0))
+            let mut it = r["version"]
+                .as_str()
+                .unwrap_or("0")
+                .split('.')
+                .map(|x| x.parse::<u64>().unwrap_or(0));
+            (
+                it.next().unwrap_or(0),
+                it.next().unwrap_or(0),
+                it.next().unwrap_or(0),
+            )
         })
         .ok_or_else(|| anyhow!("no iOS simulator runtime installed (install one via Xcode)"))
 }
@@ -120,14 +144,26 @@ fn default_device(runtime: &Value) -> Result<(String, String)> {
         .unwrap_or_default()
         .iter()
         .filter_map(|t| {
-            Some((t["identifier"].as_str()?.to_string(), t["minRuntimeVersion"].as_i64().unwrap_or(0)))
+            Some((
+                t["identifier"].as_str()?.to_string(),
+                t["minRuntimeVersion"].as_i64().unwrap_or(0),
+            ))
         })
         .collect();
-    let types = runtime["supportedDeviceTypes"].as_array().cloned().unwrap_or_default();
+    let types = runtime["supportedDeviceTypes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     let best = types
         .iter()
         .filter(|t| t["productFamily"].as_str() == Some("iPhone"))
-        .max_by_key(|t| t["identifier"].as_str().and_then(|i| minver.get(i)).copied().unwrap_or(0))
+        .max_by_key(|t| {
+            t["identifier"]
+                .as_str()
+                .and_then(|i| minver.get(i))
+                .copied()
+                .unwrap_or(0)
+        })
         .ok_or_else(|| anyhow!("no iPhone device type for the newest runtime"))?;
     Ok((
         best["identifier"].as_str().unwrap_or_default().to_string(),
@@ -142,7 +178,10 @@ fn device_state(udid: &str) -> Result<Option<(String, String)>> {
         for (rt, devs) in map {
             for d in devs.as_array().cloned().unwrap_or_default() {
                 if d["udid"].as_str() == Some(udid) {
-                    return Ok(Some((d["state"].as_str().unwrap_or("?").to_string(), rt.clone())));
+                    return Ok(Some((
+                        d["state"].as_str().unwrap_or("?").to_string(),
+                        rt.clone(),
+                    )));
                 }
             }
         }
@@ -157,7 +196,9 @@ pub fn states_for(udids: &[String]) -> BTreeMap<String, String> {
     if udids.is_empty() {
         return out;
     }
-    let Ok(j) = simctl_json("devices") else { return out };
+    let Ok(j) = simctl_json("devices") else {
+        return out;
+    };
     if let Some(map) = j["devices"].as_object() {
         for devs in map.values() {
             for d in devs.as_array().cloned().unwrap_or_default() {
@@ -179,7 +220,10 @@ pub fn ensure_device(name: &str, meta: &mut InstanceMeta, device: Option<&str>) 
             println!("simulator ready: wtx-{name} ({})", meta.sim_udid);
             return Ok(());
         }
-        eprintln!("wtx: recorded simulator {} is gone; creating a new one", meta.sim_udid);
+        eprintln!(
+            "wtx: recorded simulator {} is gone; creating a new one",
+            meta.sim_udid
+        );
     }
     let rt = newest_ios_runtime()?;
     let rt_id = rt["identifier"].as_str().unwrap_or_default().to_string();
@@ -250,8 +294,10 @@ const PORT_LO: u16 = 42000;
 const PORT_HI: u16 = 42999;
 
 fn alloc_host_port(extra_used: &BTreeMap<String, PortMap>) -> Result<u16> {
-    let mut used: std::collections::HashSet<u16> =
-        all_metas().iter().flat_map(|(_, m)| m.ports.values().map(|p| p.host)).collect();
+    let mut used: std::collections::HashSet<u16> = all_metas()
+        .iter()
+        .flat_map(|(_, m)| m.ports.values().map(|p| p.host))
+        .collect();
     used.extend(extra_used.values().map(|p| p.host));
     for p in PORT_LO..=PORT_HI {
         if used.contains(&p) {
@@ -270,7 +316,13 @@ pub fn inherit_ports(src: &BTreeMap<String, PortMap>) -> BTreeMap<String, PortMa
     for (label, p) in src {
         match alloc_host_port(&out) {
             Ok(host) => {
-                out.insert(label.clone(), PortMap { host, guest: p.guest });
+                out.insert(
+                    label.clone(),
+                    PortMap {
+                        host,
+                        guest: p.guest,
+                    },
+                );
             }
             Err(e) => eprintln!("wtx: warning: port {label} not inherited: {e}"),
         }
@@ -282,7 +334,13 @@ pub fn inherit_ports(src: &BTreeMap<String, PortMap>) -> BTreeMap<String, PortMa
 fn env_key(label: &str) -> String {
     label
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -291,8 +349,14 @@ pub fn wire(name: Option<&str>, spec: &str) -> Result<()> {
     let (label, guest) = spec
         .split_once(':')
         .ok_or_else(|| anyhow!("spec must be LABEL:GUESTPORT (e.g. api:3000)"))?;
-    let guest: u16 = guest.parse().map_err(|_| anyhow!("bad guest port in {spec}"))?;
-    if label.is_empty() || !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    let guest: u16 = guest
+        .parse()
+        .map_err(|_| anyhow!("bad guest port in {spec}"))?;
+    if label.is_empty()
+        || !label
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         return Err(anyhow!("label must be alphanumeric/-/_ : {label}"));
     }
     let host = match meta.ports.get(label) {
@@ -304,10 +368,14 @@ pub fn wire(name: Option<&str>, spec: &str) -> Result<()> {
         }
         None => alloc_host_port(&meta.ports)?,
     };
-    meta.ports.insert(label.to_string(), PortMap { host, guest });
+    meta.ports
+        .insert(label.to_string(), PortMap { host, guest });
     lima::save_meta(&name, &meta)?;
     sshx::ensure_forward(&name, host, guest)?;
-    println!("{label}: host {host} -> guest {guest} (WTX_PORT_{}={host})", env_key(label));
+    println!(
+        "{label}: host {host} -> guest {guest} (WTX_PORT_{}={host})",
+        env_key(label)
+    );
     Ok(())
 }
 
@@ -324,7 +392,12 @@ pub fn env(name: Option<&str>, json: bool) -> Result<()> {
         let ports: serde_json::Map<String, Value> = meta
             .ports
             .iter()
-            .map(|(l, p)| (l.clone(), serde_json::json!({"host": p.host, "guest": p.guest})))
+            .map(|(l, p)| {
+                (
+                    l.clone(),
+                    serde_json::json!({"host": p.host, "guest": p.guest}),
+                )
+            })
             .collect();
         let j = serde_json::json!({
             "vm": name,
@@ -350,7 +423,11 @@ pub fn env(name: Option<&str>, json: bool) -> Result<()> {
 
 pub fn status(name: Option<&str>, json: bool) -> Result<()> {
     let (name, meta) = resolve(name)?;
-    let dev = if meta.sim_udid.is_empty() { None } else { device_state(&meta.sim_udid)? };
+    let dev = if meta.sim_udid.is_empty() {
+        None
+    } else {
+        device_state(&meta.sim_udid)?
+    };
     if json {
         let ports: serde_json::Map<String, Value> = meta
             .ports
@@ -391,7 +468,11 @@ pub fn status(name: Option<&str>, json: bool) -> Result<()> {
         }
     }
     for (label, p) in &meta.ports {
-        let alive = if sshx::master_alive(&name, p.host) { "armed" } else { "down" };
+        let alive = if sshx::master_alive(&name, p.host) {
+            "armed"
+        } else {
+            "down"
+        };
         println!("  {label}: host {} -> guest {} [{alive}]", p.host, p.guest);
     }
     Ok(())

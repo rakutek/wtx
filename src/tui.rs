@@ -18,7 +18,11 @@ use std::time::{Duration, Instant};
 
 /// プロジェクト見出しか、その配下のVMか。
 enum Row {
-    Group { key: String, vms: usize, running: usize },
+    Group {
+        key: String,
+        vms: usize,
+        running: usize,
+    },
     Vm(Instance),
 }
 
@@ -29,7 +33,11 @@ enum Msg {
         sim_states: BTreeMap<String, String>,
         mirror_line: String,
     },
-    OpDone { name: String, verb: &'static str, result: std::result::Result<(), String> },
+    OpDone {
+        name: String,
+        verb: &'static str,
+        result: std::result::Result<(), String>,
+    },
 }
 
 // 列幅。ヘッダー行の先頭4桁 = 枠(1) + 選択記号(1) + VM行の字下げ(2) に合わせてある。
@@ -73,15 +81,27 @@ fn fetch_state() -> (Vec<Instance>, BTreeMap<String, String>, String) {
             .map(|i| i.sim_udid.clone())
             .collect::<Vec<_>>(),
     );
-    let mode = if crate::launchd::installed() { "launchd" } else { "manual" };
+    let mode = if crate::launchd::installed() {
+        "launchd"
+    } else {
+        "manual"
+    };
     let up: Vec<String> = mirror::mirror_config()
         .into_iter()
         .map(|e| {
-            let mark = if mirror::port_alive(e.port) { "●" } else { "○" };
+            let mark = if mirror::port_alive(e.port) {
+                "●"
+            } else {
+                "○"
+            };
             format!("{mark}{}", e.registry)
         })
         .collect();
-    (instances, sim_states, format!("mirror[{mode}]  {}", up.join("  ")))
+    (
+        instances,
+        sim_states,
+        format!("mirror[{mode}]  {}", up.join("  ")),
+    )
 }
 
 impl App {
@@ -139,7 +159,11 @@ impl App {
             let mut vms = groups.remove(&k).unwrap_or_default();
             vms.sort_by(|a, b| a.name.cmp(&b.name));
             let running = vms.iter().filter(|v| v.status == "Running").count();
-            self.rows.push(Row::Group { key: k.clone(), vms: vms.len(), running });
+            self.rows.push(Row::Group {
+                key: k.clone(),
+                vms: vms.len(),
+                running,
+            });
             if !self.collapsed.contains(&k) {
                 self.rows.extend(vms.into_iter().map(Row::Vm));
             }
@@ -156,7 +180,8 @@ impl App {
             Some(i) => self.state.select(Some(i)),
             None => {
                 let cur = self.state.selected().unwrap_or(0);
-                self.state.select(self.rows.len().checked_sub(1).map(|last| cur.min(last)));
+                self.state
+                    .select(self.rows.len().checked_sub(1).map(|last| cur.min(last)));
             }
         }
     }
@@ -209,7 +234,11 @@ impl App {
         let tx = self.tx.clone();
         std::thread::spawn(move || {
             let (instances, sim_states, mirror_line) = fetch_state();
-            let _ = tx.send(Msg::Refreshed { instances, sim_states, mirror_line });
+            let _ = tx.send(Msg::Refreshed {
+                instances,
+                sim_states,
+                mirror_line,
+            });
         });
     }
 
@@ -240,7 +269,11 @@ impl App {
     /// need_clear: 子プロセスが画面に書いた行を次フレームで消したいとき true。
     fn handle(&mut self, m: Msg, need_clear: &mut bool) {
         match m {
-            Msg::Refreshed { instances, sim_states, mirror_line } => {
+            Msg::Refreshed {
+                instances,
+                sim_states,
+                mirror_line,
+            } => {
                 self.refreshing = false;
                 self.apply(instances, sim_states, mirror_line);
             }
@@ -307,7 +340,9 @@ fn event_loop<B: Backend + std::io::Write>(term: &mut Terminal<B>) -> Result<()>
             }
             continue;
         }
-        let Event::Key(k) = event::read()? else { continue };
+        let Event::Key(k) = event::read()? else {
+            continue;
+        };
         if k.kind != KeyEventKind::Press {
             continue;
         }
@@ -347,7 +382,11 @@ fn event_loop<B: Backend + std::io::Write>(term: &mut Terminal<B>) -> Result<()>
                     app.set_status(format!("{}: operation in progress", i.name), false)
                 }
                 Some(i) => {
-                    let verb = if i.status == "Running" { "stop" } else { "start" };
+                    let verb = if i.status == "Running" {
+                        "stop"
+                    } else {
+                        "start"
+                    };
                     app.spawn_op(i.name, verb);
                 }
                 None => app.set_status("select a VM first".into(), false),
@@ -356,7 +395,9 @@ fn event_loop<B: Backend + std::io::Write>(term: &mut Terminal<B>) -> Result<()>
                 if app.toggle_group() {
                     continue;
                 }
-                let Some(i) = app.selected_vm().cloned() else { continue };
+                let Some(i) = app.selected_vm().cloned() else {
+                    continue;
+                };
                 if app.busy(&i.name) {
                     app.set_status(format!("{}: operation in progress", i.name), false);
                     continue;
@@ -398,7 +439,10 @@ fn draw(f: &mut Frame, app: &mut App) {
     .split(f.area());
 
     let mut title = vec![
-        Span::styled(" wtx ", Style::new().bold().bg(Color::Cyan).fg(Color::Black)),
+        Span::styled(
+            " wtx ",
+            Style::new().bold().bg(Color::Cyan).fg(Color::Black),
+        ),
         Span::raw("  "),
         Span::styled(app.mirror_line.clone(), Style::new().fg(Color::DarkGray)),
     ];
@@ -452,14 +496,23 @@ fn draw(f: &mut Frame, app: &mut App) {
                 if i.repo.is_empty() { "-" } else { &i.repo }
             );
             if !i.sim_udid.is_empty() {
-                let st = app.sim_states.get(&i.sim_udid).map(String::as_str).unwrap_or("missing");
+                let st = app
+                    .sim_states
+                    .get(&i.sim_udid)
+                    .map(String::as_str)
+                    .unwrap_or("missing");
                 d.push_str(&format!("\nsim     : {} ({st})", i.sim_udid));
             }
             if let Some((verb, since)) = app.in_flight.get(&i.name) {
-                d.push_str(&format!("\nop      : {verb} in progress ({}s)", since.elapsed().as_secs()));
+                d.push_str(&format!(
+                    "\nop      : {verb} in progress ({}s)",
+                    since.elapsed().as_secs()
+                ));
             }
             if i.orphaned {
-                d.push_str("\nORPHANED: the worktree is gone (commits are on the host; delete when done)");
+                d.push_str(
+                    "\nORPHANED: the worktree is gone (commits are on the host; delete when done)",
+                );
             }
             d
         }
@@ -485,7 +538,10 @@ fn draw(f: &mut Frame, app: &mut App) {
     } else {
         Style::new().fg(Color::White)
     };
-    f.render_widget(Paragraph::new(format!(" {}", app.status)).style(status_style), chunks[4]);
+    f.render_widget(
+        Paragraph::new(format!(" {}", app.status)).style(status_style),
+        chunks[4],
+    );
     f.render_widget(
         Paragraph::new(HELP).style(Style::new().fg(Color::DarkGray)),
         chunks[5],
@@ -523,7 +579,11 @@ fn draw(f: &mut Frame, app: &mut App) {
 fn render_row<'a>(app: &App, row: &'a Row) -> ListItem<'a> {
     match row {
         Row::Group { key, vms, running } => {
-            let mark = if app.collapsed.contains(key) { "▸" } else { "▾" };
+            let mark = if app.collapsed.contains(key) {
+                "▸"
+            } else {
+                "▾"
+            };
             let label = if key.is_empty() {
                 "(no project)".to_string()
             } else {
@@ -537,7 +597,10 @@ fn render_row<'a>(app: &App, row: &'a Row) -> ListItem<'a> {
                 )
             };
             ListItem::new(Line::from(vec![
-                Span::styled(format!("{mark} {label}"), Style::new().bold().fg(Color::Cyan)),
+                Span::styled(
+                    format!("{mark} {label}"),
+                    Style::new().bold().fg(Color::Cyan),
+                ),
                 Span::styled(
                     format!("  [{running}/{vms} running]"),
                     Style::new().fg(Color::DarkGray),
@@ -549,7 +612,10 @@ fn render_row<'a>(app: &App, row: &'a Row) -> ListItem<'a> {
             if let Some((verb, since)) = app.in_flight.get(&i.name) {
                 let sp = SPINNER[(since.elapsed().as_millis() / 120) as usize % SPINNER.len()];
                 spans.push(Span::styled(
-                    fit(&format!("{sp} {verb} {}s", since.elapsed().as_secs()), W_STATUS),
+                    fit(
+                        &format!("{sp} {verb} {}s", since.elapsed().as_secs()),
+                        W_STATUS,
+                    ),
                     Style::new().fg(Color::Yellow),
                 ));
             } else {
@@ -558,19 +624,29 @@ fn render_row<'a>(app: &App, row: &'a Row) -> ListItem<'a> {
                     "Stopped" => Color::DarkGray,
                     _ => Color::Yellow,
                 };
-                spans.push(Span::styled(fit(&i.status, W_STATUS), Style::new().fg(color)));
+                spans.push(Span::styled(
+                    fit(&i.status, W_STATUS),
+                    Style::new().fg(color),
+                ));
             }
             spans.push(Span::raw(fit(&i.branch, W_BRANCH)));
             if i.sim_udid.is_empty() {
                 spans.push(Span::raw(" ".repeat(W_SIM)));
             } else {
-                let st = app.sim_states.get(&i.sim_udid).map(String::as_str).unwrap_or("missing");
+                let st = app
+                    .sim_states
+                    .get(&i.sim_udid)
+                    .map(String::as_str)
+                    .unwrap_or("missing");
                 let c = match st {
                     "Booted" => Color::Green,
                     "Shutdown" => Color::DarkGray,
                     _ => Color::Yellow,
                 };
-                spans.push(Span::styled(fit(&format!("sim:{st}"), W_SIM), Style::new().fg(c)));
+                spans.push(Span::styled(
+                    fit(&format!("sim:{st}"), W_SIM),
+                    Style::new().fg(c),
+                ));
             }
             if i.orphaned {
                 spans.push(Span::styled("orphaned", Style::new().fg(Color::Red).bold()));
@@ -610,5 +686,10 @@ fn compact_path(p: &str) -> String {
 fn centered(w: u16, h: u16, area: Rect) -> Rect {
     let x = area.x + area.width.saturating_sub(w) / 2;
     let y = area.y + area.height.saturating_sub(h) / 2;
-    Rect { x, y, width: w.min(area.width), height: h.min(area.height) }
+    Rect {
+        x,
+        y,
+        width: w.min(area.width),
+        height: h.min(area.height),
+    }
 }

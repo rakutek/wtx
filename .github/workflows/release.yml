@@ -1,0 +1,133 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+
+env:
+  CARGO_TERM_COLOR: always
+  TAP_REPOSITORY: rakutek/homebrew-tap
+
+jobs:
+  release:
+    name: arm64 binary and Homebrew tap
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Validate tag and package version
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "tag must have the form vX.Y.Z" >&2
+            exit 1
+          fi
+
+          version="${GITHUB_REF_NAME#v}"
+          crate_version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "wtx") | .version')"
+          if [[ "${version}" != "${crate_version}" ]]; then
+            echo "tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${crate_version}" >&2
+            exit 1
+          fi
+
+          target="aarch64-apple-darwin"
+          host="$(rustc -vV | awk '/^host:/ { print $2 }')"
+          if [[ "${host}" != "${target}" ]]; then
+            echo "release runner must be ${target}, got ${host}" >&2
+            exit 1
+          fi
+
+          archive="wtx-${version}-${target}.tar.gz"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "target=${target}" >> "${GITHUB_OUTPUT}"
+          echo "archive=${archive}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package binary
+        shell: bash
+        env:
+          VERSION: ${{ steps.metadata.outputs.version }}
+          TARGET: ${{ steps.metadata.outputs.target }}
+          ARCHIVE: ${{ steps.metadata.outputs.archive }}
+        run: |
+          set -euo pipefail
+          package="wtx-${VERSION}-${TARGET}"
+          mkdir -p "dist/${package}"
+          cp target/release/wtx LICENSE-MIT LICENSE-APACHE "dist/${package}/"
+          tar -czf "dist/${ARCHIVE}" -C dist "${package}"
+          shasum -a 256 "dist/${ARCHIVE}" > "dist/${ARCHIVE}.sha256"
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.metadata.outputs.version }}
+          ARCHIVE: ${{ steps.metadata.outputs.archive }}
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" \
+              "dist/${ARCHIVE}" "dist/${ARCHIVE}.sha256" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              "dist/${ARCHIVE}" "dist/${ARCHIVE}.sha256" \
+              --verify-tag \
+              --title "wtx ${VERSION}" \
+              --generate-notes
+          fi
+
+      - name: Check Homebrew tap deploy key
+        shell: bash
+        env:
+          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+        run: |
+          if [[ -z "${HOMEBREW_TAP_DEPLOY_KEY}" ]]; then
+            echo "HOMEBREW_TAP_DEPLOY_KEY is required to update ${TAP_REPOSITORY}" >&2
+            exit 1
+          fi
+
+      - name: Check out Homebrew tap
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TAP_REPOSITORY }}
+          ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          path: homebrew-tap
+
+      - name: Update Homebrew formula
+        shell: bash
+        env:
+          VERSION: ${{ steps.metadata.outputs.version }}
+          ARCHIVE: ${{ steps.metadata.outputs.archive }}
+        run: |
+          set -euo pipefail
+          sha256="$(awk '{ print $1 }' "dist/${ARCHIVE}.sha256")"
+          mkdir -p homebrew-tap/Formula
+          sed \
+            -e "s/__VERSION__/${VERSION}/g" \
+            -e "s/__SHA256__/${sha256}/g" \
+            .github/homebrew/wtx.rb.in > homebrew-tap/Formula/wtx.rb
+
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/wtx.rb
+          if git diff --cached --quiet; then
+            echo "Formula/wtx.rb is already up to date"
+            exit 0
+          fi
+          git commit -m "wtx ${VERSION} に更新"
+          git push
