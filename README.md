@@ -19,7 +19,7 @@ English | [日本語](README.ja.md)
 ---
 
 Parallel agents on separate branches still collide when they share one Docker daemon, one
-database, and one `localhost:5432`. wtx (**Worktree X**) gives every git worktree a dedicated
+database, and one `localhost:5432`. **wtx** gives every git worktree a dedicated
 Lima/vz microVM with its own dockerd, volumes, images, and localhost namespace.
 
 Agents, editors, Git, and credentials stay on the macOS host. Docker, databases, services,

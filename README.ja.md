@@ -19,7 +19,7 @@ DBごとcloneできる専用runtimeを渡す。
 ---
 
 別々のブランチで並列に動くエージェントも、1つのDocker daemon、DB、
-`localhost:5432`を共有すれば衝突する。wtx（**Worktree X**）はgit worktreeごとに
+`localhost:5432`を共有すれば衝突する。**wtx**はgit worktreeごとに
 専用のLima/vz microVMを用意し、dockerd、volume、image、localhostを分離する。
 
 エージェント、editor、Git、資格情報はmacOS hostに置く。Docker、DB、service、
