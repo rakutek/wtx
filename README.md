@@ -22,7 +22,7 @@ Running three coding agents on three branches of the same repo sounds great — 
 bind `localhost:5432`, all run `docker compose up` against the same daemon, and one branch's
 migration wrecks the database another branch was testing against.
 
-`wtx` gives each git worktree its own microVM (Lima/vz) with a dedicated in-VM dockerd.
+`wtx` (**Worktree X**) gives each git worktree its own microVM (Lima/vz) with a dedicated in-VM dockerd.
 Each branch gets the same familiar localhost ports, but a different database, volume, and
 image store. Agents, editing, Git, and credentials stay on the host; only Docker, databases,
 services, and container-dependent tests go through `wtx exec`. No Docker Desktop.
@@ -61,8 +61,8 @@ services, and container-dependent tests go through `wtx exec`. No Docker Desktop
 - 📱 **Per-worktree iOS simulators** — `wtx sim` pairs a dedicated simulator device with
   each worktree's VM and hands agents its UDID and ports as env vars
 - 🖥️ **A TUI console** — one screen for every VM, grouped by project, plus mirror health
-- ⬆️ **Quiet update checks** — explicit with `wtx update check`; the interactive TUI uses a
-  24-hour cache and never turns ordinary commands into network calls
+- ⬆️ **One-command upgrades** — `wtx upgrade` refreshes the tap metadata and upgrades wtx;
+  the interactive TUI checks for updates with a 24-hour cache
 
 > [!WARNING]
 > **wtx isolates runtime collisions, not trust.** The worktree and `.git` are writable host
@@ -231,21 +231,26 @@ the affected VM shows a spinner with elapsed seconds in its STATUS cell, and you
 navigating (or quit) while an operation is in flight.
 
 The interactive TUI also checks GitHub Releases in the background at most once every 24
-hours and shows `brew upgrade wtx` only when a newer stable release exists. Failures stay
-silent. `wtx tui --snapshot` never checks or displays update notices.
+hours and shows an upgrade prompt only when a newer stable release exists. Press `u`, then
+confirm with `y`, to upgrade without leaving the TUI. Homebrew runs in the background; restart
+wtx after it succeeds to use the installed version. The TUI verifies that Homebrew installed
+the advertised version and keeps the notice available for retry if the tap is still catching up.
+Update-check failures stay silent.
+`wtx tui --snapshot` never checks or displays update notices.
 
 The CLI and TUI are fully English — output, help, and labels.
 
-### Update checks
+### Updates
 
-Run `wtx update check` for an explicit check, or add `--json` for a versioned machine-readable
-result. Ordinary commands never perform an update request. Set `WTX_NO_UPDATE_CHECK=1` to
-disable the TUI's background check. wtx does not self-update; Homebrew remains responsible
-for installation and upgrades:
+Run `wtx upgrade` to refresh Homebrew's tap metadata and upgrade wtx in one step. Homebrew
+remains responsible for the installation and package update.
+
+Run `wtx update check` to check without installing, or add `--json` for a versioned
+machine-readable result. Ordinary commands never perform an update request. Set
+`WTX_NO_UPDATE_CHECK=1` to disable the TUI's background check:
 
 ```bash
-wtx update check --json
-brew upgrade wtx
+wtx upgrade
 ```
 
 ## Why not …?
@@ -297,6 +302,7 @@ there is no collection step. The evaluation notes are in
 | `wtx which` | Print the VM name for the current worktree (composable) |
 | `wtx completions SHELL` | Print shell completions (bash, zsh, fish, elvish, powershell) |
 | `wtx sim up\|status\|wire\|env\|rm` | Per-worktree iOS simulator |
+| `wtx upgrade` | Refresh Homebrew tap metadata and upgrade wtx |
 | `wtx update check [--json]` | Check GitHub Releases for a newer version without installing it |
 
 ## Working with orchestrators and agents

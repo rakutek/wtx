@@ -267,6 +267,8 @@ enum Cmd {
         #[command(subcommand)]
         action: Option<SimCmd>,
     },
+    /// Refresh Homebrew metadata and upgrade wtx
+    Upgrade,
     /// Check GitHub Releases for a newer wtx version
     Update {
         #[command(subcommand)]
@@ -487,6 +489,7 @@ fn run() -> Result<()> {
                 Ok(())
             }
         },
+        Some(Cmd::Upgrade) => update::upgrade(),
         Some(Cmd::Update { action }) => match action {
             UpdateCmd::Check { json } => update::check_and_print(json),
         },
@@ -727,5 +730,11 @@ mod tests {
             } => assert!(json),
             _ => panic!("expected update check"),
         }
+    }
+
+    #[test]
+    fn upgrade_is_a_top_level_command() {
+        let cli = Cli::try_parse_from(["wtx", "upgrade"]).unwrap();
+        assert!(matches!(cli.cmd, Some(Cmd::Upgrade)));
     }
 }

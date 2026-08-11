@@ -60,13 +60,14 @@ wtx ls --json                          # 一覧（機械可読。worktreeが消�
 wtx prune --yes                        # 孤児VMを掃除
 wtx                                    # 引数なしで ratatui コンソール
 wtx update check --json                # 新しい安定版を明示確認（更新はしない）
+wtx upgrade                            # Homebrewのtap情報更新 + wtx本体のupgrade
 ```
 
 - VM内でコミットすると**そのままホストのブランチが進む**。回収の手順（旧 `wtx sync`）は
   存在しない。VM内pushは`--agent-access`で作成し、host ssh-agentに鍵がある場合だけ使える。
 - TUI はVMを**プロジェクト（`wtx up` 時に記録したメインリポジトリ）ごとにまとめて**表示する。
   見出し行で `Space`/`Enter` を押すと開閉し、`[稼働数/総数]` の要約だけになる。
-  VM行では `s` 起動/停止、`d` 削除、`Enter` でシェル。
+  VM行では `s` 起動/停止、`d` 削除、`Enter` でシェル。更新通知中は`u` → `y`でupgrade。
 - `wtx exec` は **argv 素通し**でシェル構文を解釈しない。パイプ・glob・リダイレクトは
   `wtx exec -- bash -c '...'` の形で渡す。終了コードは素通しされる。
 - 対話CLIは `wtx exec [--name NAME] --tty -- CMD...` で起動する。`--tty` はSSHのPTYを
@@ -234,13 +235,16 @@ wtx mirror [status|serve|up|down|install|uninstall|gc] # 省略時 status
 - `~/.wtx/mirrors.json` を編集したら `wtx mirror install` を再実行する。
 - ゴールデンVMはprovision schema receiptで互換性を確認する。古ければrebuildする。
 
-## 更新確認
+## 更新
 
 - ユーザーがversion確認を求めたときだけ`wtx update check --json`を実行し、構造化結果を読む。
 - 通常コマンドは更新確認の通信をしない。対話TUIだけが24時間cache付きで非同期確認する。
   `wtx tui --snapshot`は確認も通知表示もしない。
-- TUI確認を無効化する場合は`WTX_NO_UPDATE_CHECK=1`。wtxにself-update機能はないため、
-  更新を頼まれた場合は結果を示して`brew upgrade wtx`を案内し、勝手に実行しない。
+- TUI確認を無効化する場合は`WTX_NO_UPDATE_CHECK=1`。ユーザーがwtx本体の更新を明示的に依頼したときは
+  `wtx upgrade`を実行する。Homebrewのtap情報を更新し、wtxだけをupgradeする。
+- TUIで更新通知が出ているときは`u` → `y`で同じupgradeを実行できる。完了後は
+  インストールされたversionを使うためwtxを再起動する。tapが通知versionに未到達なら
+  更新通知は残り、再試行できる。
 
 ## エージェント運用のヒント
 

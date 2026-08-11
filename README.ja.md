@@ -20,7 +20,7 @@ DBごとcloneできる専用runtimeを渡す。
 
 同じリポジトリの3ブランチで3つのコーディングエージェントを走らせると、全員が `localhost:5432` を取り合い、全員が同じデーモンへ `docker compose up` し、あるブランチのマイグレーションが別ブランチの検証中の DB を壊す。
 
-wtx は git worktree ごとに専用の microVM（Lima/vz）と VM 内専用の dockerd を与える。
+wtx（**Worktree X**）は git worktree ごとに専用の microVM（Lima/vz）と VM 内専用の dockerd を与える。
 各ブランチは同じlocalhostのポートを使いながら、別々のDB、volume、イメージストアを持つ。
 エージェント、編集、Git、資格情報はホストに置き、Docker、DB、service、container依存testだけを
 `wtx exec`でVMへ送る。
@@ -53,7 +53,7 @@ Docker Desktop は不要。
 - 📦 **内蔵レジストリキャッシュ**：Docker不要のpull-through cache。blobをstream配信し、Rangeと容量上限付き自動GCに対応
 - 📱 **worktree 専用 iOS シミュレータ**：`wtx sim` が worktree ごとの専用デバイスを VM と対にし、UDID とポートを環境変数でエージェントに渡す
 - 🖥️ **TUI コンソール**：全 VM をプロジェクトごとにまとめ、ミラーの稼働状況とともに1画面で操作する
-- ⬆️ **静かな更新確認**：明示実行は `wtx update check`。対話TUIは24時間cacheを使い、通常コマンドでは通信しない
+- ⬆️ **1コマンドで更新**：`wtx upgrade` はtap情報の更新からwtx本体のupgradeまで完結する。対話TUIの更新確認は24時間cacheを使う
 
 > [!WARNING]
 > **wtxが分離するのはruntimeの衝突であり、信頼境界ではない。**
@@ -196,20 +196,24 @@ start / stop / delete と状態ポーリングはバックグラウンドで走�
 操作中の VM は STATUS 欄にスピナーと経過秒数を表示し、その間も他の行の操作や終了ができる。
 
 対話TUIはGitHub Releasesも24時間に最大1回だけバックグラウンド確認し、新しい安定版がある場合だけ
-`brew upgrade wtx`を表示する。失敗は表示しない。`wtx tui --snapshot`は更新確認も通知表示もしない。
+upgrade案内を表示する。`u`を押し、確認画面で`y`を押すとTUI内から更新できる。
+Homebrewの処理はバックグラウンドで走り、成功後は新しいversionを使うためwtxを再起動する。
+通知されたversionがHomebrewに入ったことも検証し、tapの更新待ちなら通知を残して再試行できる。
+更新確認の失敗は表示しない。`wtx tui --snapshot`は更新確認も通知表示もしない。
 
 CLI の出力、ヘルプ、TUI のラベルはすべて英語。
 
-### 更新確認
+### 更新
 
-明示的に確認するときは`wtx update check`、agentやscriptからはversion付きmachine-readable結果を返す
-`wtx update check --json`を使う。通常コマンドは更新確認の通信をしない。
-`WTX_NO_UPDATE_CHECK=1`でTUIのバックグラウンド確認も無効化できる。wtx自身は更新を行わず、
-インストールと更新はHomebrewに任せる。
+実際の更新は`wtx upgrade`で完結する。Homebrewの自動更新間隔に左右されないように
+tap情報を更新し、wtxだけをupgradeする。インストール元とパッケージ管理は引き続きHomebrewに任せる。
+
+更新の有無だけ確認するときは`wtx update check`、agentやscriptからはversion付き
+machine-readable結果を返す`wtx update check --json`を使う。通常コマンドは更新確認の通信をしない。
+`WTX_NO_UPDATE_CHECK=1`でTUIのバックグラウンド確認も無効化できる。
 
 ```bash
-wtx update check --json
-brew upgrade wtx
+wtx upgrade
 ```
 
 ## なぜ既存の方法ではだめか
@@ -256,6 +260,7 @@ wtx は OSS スタック（Lima）でアカウント不要、ホストの `.git`
 | `wtx which` | カレント worktree の VM 名を表示（他コマンドと組み合わせ可） |
 | `wtx completions SHELL` | シェル補完を出力（bash, zsh, fish など） |
 | `wtx sim up\|status\|wire\|env\|rm` | worktree 専用 iOS シミュレータ |
+| `wtx upgrade` | Homebrewのtap情報を更新し、wtxをupgrade |
 | `wtx update check [--json]` | GitHub Releasesの新しいversionを確認（インストールはしない） |
 
 ## オーケストレータ（Orca 等）との連携方針

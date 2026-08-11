@@ -1,6 +1,6 @@
 //! ratatui コンソール: VMをプロジェクト（ホスト側リポジトリ）ごとにまとめて表示し、
-//! 起動/停止・削除・シェル起動を1画面で操作する。
-//! 時間のかかる処理（limactl start/stop/delete と状態の取得）はバックグラウンド
+//! 起動/停止・削除・シェル起動・wtxのupgradeを1画面で操作する。
+//! 時間のかかる処理（limactl start/stop/delete、upgrade、状態の取得）はバックグラウンド
 //! スレッドで実行し、UIは操作中も止まらない。
 use crate::lima::{self, Instance};
 use crate::mirror;
@@ -27,6 +27,12 @@ enum Row {
     Vm(Instance),
 }
 
+/// 誤操作を避けるため確認が必要な操作。
+enum Confirm {
+    Delete(String),
+    Upgrade(String),
+}
+
 /// バックグラウンドスレッドからUIへの通知。
 enum Msg {
     Refreshed {
@@ -40,6 +46,10 @@ enum Msg {
         result: std::result::Result<(), String>,
     },
     UpdateChecked(UpdateStatus),
+    UpgradeDone {
+        version: String,
+        result: std::result::Result<(), String>,
+    },
 }
 
 // 列幅。ヘッダー行の先頭4桁 = 枠(1) + 選択記号(1) + VM行の字下げ(2) に合わせてある。
@@ -51,7 +61,7 @@ const W_SIM: usize = 12;
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 const HELP: &str =
-    " j/k:move  Enter:shell/fold  s:start/stop  d:delete  Space:fold  r:refresh  q:quit";
+    " j/k:move  Enter:shell/fold  s:start/stop  d:delete  u:upgrade  Space:fold  r:refresh  q:quit";
 
 struct App {
     instances: Vec<Instance>,
@@ -60,8 +70,8 @@ struct App {
     state: ListState,
     status: String,
     status_err: bool,
-    /// 削除確認中のVM名。d押下時に固定し、確認中に行がずれても対象は変わらない。
-    confirm: Option<String>,
+    /// 確認中の操作。押下時に対象を固定し、確認中に状態が変わっても対象は変わらない。
+    confirm: Option<Confirm>,
     mirror_line: String,
     last_refresh: Instant,
     /// worktree専用シミュレータの状態（UDID → Booted/Shutdown）。sim を使うVMが無ければ空。
@@ -70,6 +80,8 @@ struct App {
     in_flight: HashMap<String, (&'static str, Instant)>,
     refreshing: bool,
     update_available: Option<UpdateStatus>,
+    /// upgrade先versionと開始時刻。二重実行と実行中の終了を防ぐ。
+    upgrading: Option<(String, Instant)>,
     tx: Sender<Msg>,
 }
 
@@ -123,6 +135,7 @@ impl App {
             in_flight: HashMap::new(),
             refreshing: false,
             update_available,
+            upgrading: None,
             tx,
         };
         // 初回だけ同期で取得し、最初のフレームから中身を出す（--snapshot もこれに依存）
@@ -261,6 +274,32 @@ impl App {
         });
     }
 
+    fn prompt_upgrade(&mut self) {
+        if let Some((version, _)) = &self.upgrading {
+            self.set_status(
+                format!("upgrade to v{version} is already in progress"),
+                false,
+            );
+            return;
+        }
+        let Some(update) = &self.update_available else {
+            self.set_status("no wtx update available".into(), false);
+            return;
+        };
+        self.confirm = Some(Confirm::Upgrade(update.latest_version.clone()));
+    }
+
+    /// Homebrewの出力を捕捉してupgradeし、alternate screenを壊さずUIへ結果を返す。
+    fn spawn_upgrade(&mut self, version: String) {
+        self.upgrading = Some((version.clone(), Instant::now()));
+        self.set_status(format!("upgrading wtx to v{version} …"), false);
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let result = crate::update::upgrade_captured(&version).map_err(|e| e.to_string());
+            let _ = tx.send(Msg::UpgradeDone { version, result });
+        });
+    }
+
     fn set_status(&mut self, s: String, err: bool) {
         self.status = s;
         self.status_err = err;
@@ -293,6 +332,19 @@ impl App {
             }
             Msg::UpdateChecked(status) => {
                 self.update_available = status.update_available.then_some(status);
+            }
+            Msg::UpgradeDone { version, result } => {
+                self.upgrading = None;
+                match result {
+                    Ok(()) => {
+                        self.update_available = None;
+                        self.set_status(
+                            format!("Homebrew upgrade finished for v{version} — restart wtx"),
+                            false,
+                        );
+                    }
+                    Err(e) => self.set_status(format!("upgrade failed: {e}"), true),
+                }
             }
         }
     }
@@ -362,18 +414,24 @@ fn event_loop<B: Backend + std::io::Write>(term: &mut Terminal<B>) -> Result<()>
             continue;
         }
 
-        // 削除確認モーダル: d押下時に固定した名前に対してだけ働く
-        if let Some(name) = app.confirm.take() {
-            if k.code == KeyCode::Char('y') {
-                app.spawn_op(name, "delete");
-            } else {
-                app.set_status("cancelled".into(), false);
+        // 確認モーダル: 押下時に固定した対象に対してだけ働く
+        if let Some(confirm) = app.confirm.take() {
+            match (confirm, k.code) {
+                (Confirm::Delete(name), KeyCode::Char('y')) => app.spawn_op(name, "delete"),
+                (Confirm::Upgrade(version), KeyCode::Char('y')) => app.spawn_upgrade(version),
+                _ => app.set_status("cancelled".into(), false),
             }
             continue;
         }
 
         match k.code {
-            KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+            KeyCode::Char('q') | KeyCode::Esc => {
+                if app.upgrading.is_some() {
+                    app.set_status("upgrade in progress — wait before quitting".into(), false);
+                } else {
+                    return Ok(());
+                }
+            }
             KeyCode::Char('r') => {
                 app.spawn_refresh();
                 app.set_status("refreshing…".into(), false);
@@ -389,9 +447,10 @@ fn event_loop<B: Backend + std::io::Write>(term: &mut Terminal<B>) -> Result<()>
                 Some(name) if app.busy(&name) => {
                     app.set_status(format!("{name}: operation in progress"), false)
                 }
-                Some(name) => app.confirm = Some(name),
+                Some(name) => app.confirm = Some(Confirm::Delete(name)),
                 None => app.set_status("select a VM first".into(), false),
             },
+            KeyCode::Char('u') => app.prompt_upgrade(),
             KeyCode::Char('s') => match app.selected_vm().cloned() {
                 Some(i) if app.busy(&i.name) => {
                     app.set_status(format!("{}: operation in progress", i.name), false)
@@ -457,10 +516,19 @@ fn draw(f: &mut Frame, app: &mut App) {
         " wtx ",
         Style::new().bold().bg(Color::Cyan).fg(Color::Black),
     )];
-    if let Some(update) = &app.update_available {
+    if let Some((version, since)) = &app.upgrading {
+        let spinner = SPINNER[(since.elapsed().as_millis() / 120) as usize % SPINNER.len()];
         title.push(Span::styled(
             format!(
-                "  ↑ v{} available — brew upgrade wtx",
+                "  {spinner} upgrading to v{version} ({}s)",
+                since.elapsed().as_secs()
+            ),
+            Style::new().fg(Color::Yellow),
+        ));
+    } else if let Some(update) = &app.update_available {
+        title.push(Span::styled(
+            format!(
+                "  ↑ v{} available — press u to upgrade",
                 update.latest_version
             ),
             Style::new().fg(Color::Yellow),
@@ -572,32 +640,63 @@ fn draw(f: &mut Frame, app: &mut App) {
         chunks[5],
     );
 
-    if let Some(name) = app.confirm.clone() {
-        let area = centered(64, 7, f.area());
-        f.render_widget(Clear, area);
-        f.render_widget(
-            Paragraph::new(vec![
-                Line::raw(""),
-                Line::from(vec![
-                    Span::raw(" Delete "),
-                    Span::styled(name, Style::new().bold()),
-                    Span::raw(" ?"),
-                ]),
-                Line::raw(" Its databases and images go with it."),
-                Line::raw(""),
-                Line::from(Span::styled(
-                    " y = delete    any other key = cancel",
-                    Style::new().fg(Color::DarkGray),
-                )),
-            ])
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" confirm delete ")
-                    .border_style(Style::new().fg(Color::Red)),
-            ),
-            area,
-        );
+    if let Some(confirm) = &app.confirm {
+        match confirm {
+            Confirm::Delete(name) => {
+                let area = centered(64, 7, f.area());
+                f.render_widget(Clear, area);
+                f.render_widget(
+                    Paragraph::new(vec![
+                        Line::raw(""),
+                        Line::from(vec![
+                            Span::raw(" Delete "),
+                            Span::styled(name, Style::new().bold()),
+                            Span::raw(" ?"),
+                        ]),
+                        Line::raw(" Its databases and images go with it."),
+                        Line::raw(""),
+                        Line::from(Span::styled(
+                            " y = delete    any other key = cancel",
+                            Style::new().fg(Color::DarkGray),
+                        )),
+                    ])
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(" confirm delete ")
+                            .border_style(Style::new().fg(Color::Red)),
+                    ),
+                    area,
+                );
+            }
+            Confirm::Upgrade(version) => {
+                let area = centered(68, 7, f.area());
+                f.render_widget(Clear, area);
+                f.render_widget(
+                    Paragraph::new(vec![
+                        Line::raw(""),
+                        Line::from(vec![
+                            Span::raw(" Upgrade wtx to "),
+                            Span::styled(format!("v{version}"), Style::new().bold()),
+                            Span::raw(" ?"),
+                        ]),
+                        Line::raw(" Homebrew metadata and the wtx formula will be updated."),
+                        Line::raw(""),
+                        Line::from(Span::styled(
+                            " y = upgrade    any other key = cancel",
+                            Style::new().fg(Color::DarkGray),
+                        )),
+                    ])
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(" confirm upgrade ")
+                            .border_style(Style::new().fg(Color::Yellow)),
+                    ),
+                    area,
+                );
+            }
+        }
     }
 }
 
@@ -716,5 +815,108 @@ fn centered(w: u16, h: u16, area: Rect) -> Rect {
         y,
         width: w.min(area.width),
         height: h.min(area.height),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn available_update(version: &str) -> UpdateStatus {
+        UpdateStatus {
+            schema_version: 1,
+            current_version: "0.9.0".into(),
+            latest_version: version.into(),
+            update_available: true,
+            release_url: "https://example.test/release".into(),
+        }
+    }
+
+    fn app(update_available: Option<UpdateStatus>) -> App {
+        let (tx, _rx) = mpsc::channel();
+        App {
+            instances: vec![],
+            rows: vec![],
+            collapsed: HashSet::new(),
+            state: ListState::default(),
+            status: String::new(),
+            status_err: false,
+            confirm: None,
+            mirror_line: "mirror[manual]".into(),
+            last_refresh: Instant::now(),
+            sim_states: BTreeMap::new(),
+            in_flight: HashMap::new(),
+            refreshing: false,
+            update_available,
+            upgrading: None,
+            tx,
+        }
+    }
+
+    fn rendered(app: &mut App) -> String {
+        let mut term = Terminal::new(ratatui::backend::TestBackend::new(100, 18)).unwrap();
+        term.draw(|f| draw(f, app)).unwrap();
+        let buffer = term.backend().buffer();
+        let mut rendered = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                rendered.push_str(buffer[(x, y)].symbol());
+            }
+            rendered.push('\n');
+        }
+        rendered
+    }
+
+    #[test]
+    fn update_notice_is_actionable_from_the_tui() {
+        let mut app = app(Some(available_update("1.0.0")));
+
+        assert!(rendered(&mut app).contains("v1.0.0 available — press u to upgrade"));
+        app.prompt_upgrade();
+        assert!(matches!(
+            app.confirm.as_ref(),
+            Some(Confirm::Upgrade(version)) if version == "1.0.0"
+        ));
+        assert!(rendered(&mut app).contains("Upgrade wtx to v1.0.0 ?"));
+    }
+
+    #[test]
+    fn successful_upgrade_clears_notice_and_requests_restart() {
+        let mut app = app(Some(available_update("1.0.0")));
+        app.upgrading = Some(("1.0.0".into(), Instant::now()));
+        let mut need_clear = false;
+
+        app.handle(
+            Msg::UpgradeDone {
+                version: "1.0.0".into(),
+                result: Ok(()),
+            },
+            &mut need_clear,
+        );
+
+        assert!(app.upgrading.is_none());
+        assert!(app.update_available.is_none());
+        assert!(!app.status_err);
+        assert!(app.status.contains("restart wtx"));
+    }
+
+    #[test]
+    fn failed_upgrade_keeps_notice_for_retry() {
+        let mut app = app(Some(available_update("1.0.0")));
+        app.upgrading = Some(("1.0.0".into(), Instant::now()));
+        let mut need_clear = false;
+
+        app.handle(
+            Msg::UpgradeDone {
+                version: "1.0.0".into(),
+                result: Err("brew failed".into()),
+            },
+            &mut need_clear,
+        );
+
+        assert!(app.upgrading.is_none());
+        assert!(app.update_available.is_some());
+        assert!(app.status_err);
+        assert!(app.status.contains("brew failed"));
     }
 }

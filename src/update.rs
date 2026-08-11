@@ -6,12 +6,14 @@ use reqwest::header::{ACCEPT, ETAG, IF_NONE_MATCH, USER_AGENT};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const SCHEMA_VERSION: u32 = 1;
 const CACHE_TTL_SECS: u64 = 24 * 60 * 60;
 const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/rakutek/wtx/releases/latest";
 const GITHUB_API_VERSION: &str = "2022-11-28";
+const HOMEBREW_FORMULA: &str = "rakutek/tap/wtx";
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct UpdateStatus {
@@ -185,10 +187,104 @@ pub fn check_and_print(json: bool) -> Result<()> {
             "wtx {} is available (current {})",
             result.latest_version, result.current_version
         );
-        println!("Upgrade: brew upgrade wtx");
+        println!("Upgrade: wtx upgrade");
         println!("{}", result.release_url);
     } else {
         println!("wtx {} is up to date", result.current_version);
+    }
+    Ok(())
+}
+
+fn run_brew(args: &[&str]) -> Result<()> {
+    let display = format!("brew {}", args.join(" "));
+    let status = Command::new("brew")
+        .args(args)
+        .status()
+        .with_context(|| format!("run `{display}`; is Homebrew installed?"))?;
+    if !status.success() {
+        return Err(anyhow!("`{display}` failed with {status}"));
+    }
+    Ok(())
+}
+
+fn run_brew_captured(args: &[&str]) -> Result<()> {
+    let display = format!("brew {}", args.join(" "));
+    let output = Command::new("brew")
+        .args(args)
+        .output()
+        .with_context(|| format!("run `{display}`; is Homebrew installed?"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let detail = stderr
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .or_else(|| stdout.lines().rev().find(|line| !line.trim().is_empty()))
+        .unwrap_or("Homebrew command failed");
+    Err(anyhow!("`{display}` failed: {detail}"))
+}
+
+fn parse_brew_versions(raw: &str) -> Result<Version> {
+    raw.split_whitespace()
+        .skip(1)
+        .filter_map(|value| Version::parse(value.split('_').next().unwrap_or(value)).ok())
+        .max()
+        .ok_or_else(|| anyhow!("Homebrew did not report an installed wtx version"))
+}
+
+fn installed_homebrew_version() -> Result<Version> {
+    let args = ["list", "--versions", "--formula", HOMEBREW_FORMULA];
+    let display = format!("brew {}", args.join(" "));
+    let output = Command::new("brew")
+        .args(args)
+        .output()
+        .with_context(|| format!("run `{display}`; is Homebrew installed?"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("Homebrew could not inspect wtx");
+        return Err(anyhow!("`{display}` failed: {detail}"));
+    }
+    parse_brew_versions(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn upgrade_with(mut run: impl FnMut(&[&str]) -> Result<()>) -> Result<()> {
+    run(&["update", "--quiet"])?;
+    run(&["upgrade", "--yes", "--formula", HOMEBREW_FORMULA])?;
+    Ok(())
+}
+
+/// Homebrew の自動更新間隔に左右されないよう、formula を明示更新してから wtx だけを更新する。
+pub fn upgrade() -> Result<()> {
+    let result = upgrade_with(|args| {
+        if args.first() == Some(&"update") {
+            println!("Refreshing Homebrew metadata...");
+        } else {
+            println!("Upgrading wtx...");
+        }
+        run_brew(args)
+    });
+    if result.is_ok() {
+        println!("wtx upgrade complete");
+    }
+    result
+}
+
+/// alternate screenを壊さないようHomebrewの出力を捕捉し、通知versionまで入ったことを検証する。
+pub fn upgrade_captured(expected_version: &str) -> Result<()> {
+    let expected = parse_version(expected_version)?;
+    upgrade_with(run_brew_captured)?;
+    let installed = installed_homebrew_version()?;
+    if installed < expected {
+        return Err(anyhow!(
+            "Homebrew installed wtx {installed}, but {expected} is available; retry after the tap updates"
+        ));
     }
     Ok(())
 }
@@ -234,5 +330,50 @@ mod tests {
         assert_eq!(value["latest_version"], "1.2.3");
         assert!(value.get("update_available").is_some());
         assert_eq!(value["release_url"], "https://example.test");
+    }
+
+    #[test]
+    fn upgrade_refreshes_metadata_before_upgrading_only_wtx() {
+        let mut calls = Vec::new();
+        upgrade_with(|args| {
+            calls.push(args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>());
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            calls,
+            [
+                vec!["update".to_string(), "--quiet".to_string()],
+                vec![
+                    "upgrade".to_string(),
+                    "--yes".to_string(),
+                    "--formula".to_string(),
+                    HOMEBREW_FORMULA.to_string(),
+                ],
+            ]
+        );
+    }
+
+    #[test]
+    fn upgrade_stops_when_metadata_refresh_fails() {
+        let mut calls = 0;
+        let err = upgrade_with(|_| {
+            calls += 1;
+            Err(anyhow!("update failed"))
+        })
+        .unwrap_err();
+
+        assert_eq!(calls, 1);
+        assert_eq!(err.to_string(), "update failed");
+    }
+
+    #[test]
+    fn parses_the_newest_installed_homebrew_version() {
+        assert_eq!(
+            parse_brew_versions("wtx 0.9.0 1.0.0_1\n").unwrap(),
+            Version::new(1, 0, 0)
+        );
+        assert!(parse_brew_versions("wtx\n").is_err());
     }
 }
