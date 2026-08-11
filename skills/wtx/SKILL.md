@@ -5,7 +5,8 @@ description: >-
   in-VM dockerd, DBs, ports, images, and optional host iOS simulator. Use for
   parallel coding agents, Orca/Herdr worktree runtime integration,
   fresh-worktree bootstrap, `.env.example` fallback, `wtx up --from`
-  environment seeding, golden VMs, registry mirrors,
+  environment seeding, named host ports with `wtx port` / `wtx env`,
+  golden VMs, registry mirrors,
   release update checks,
   "worktreeごとにVM/DB", "VM内でdocker", or worktree-specific simulators.
   The worktree and Git metadata are host-shared, but credentials stay on the
@@ -176,6 +177,10 @@ guest portへの再実行は同じhost portを再利用する。`wtx env [NAME] 
 forwardも再armする。host portを固定したい場合だけ`wtx forward`を使う。
 旧`wtx sim wire` / `wtx sim env`は互換aliasとして残る。
 
+実行中のwtxが`port` / `env`をhelpに列挙しない旧版なら、汎用portには`wtx forward`を使う。
+Simulatorではhelpに存在する場合だけ`wtx sim wire` / `wtx sim env`を使う。未対応commandを実行せず、
+version差を報告する。ユーザーがwtx本体の更新も明示した場合だけ`wtx upgrade`する。
+
 ## worktree専用 iOS シミュレータ（wtx sim）
 
 iOSアプリを含むリポジトリでは、worktreeごとに専用のシミュレータデバイスを持てる
@@ -187,6 +192,7 @@ iOSアプリを含むリポジトリでは、worktreeごとに専用のシミュ
 - shellから直接使う場合は、セッション開始時と長い待機・VM再起動後にworktreeディレクトリで
   `eval "$(wtx env)"` を実行する。エージェントや外部ツールから使う場合は、操作開始の
   直前に同じディレクトリで `wtx env --json` を実行し、`sim_udid` を解決する。
+  旧版で`wtx env`が無く`wtx sim env`がhelpに存在するときは後者を使う。
   ポートやUDIDは変わりうるので、セッションをまたいで値をキャッシュしない
 - シミュレータは `$WTX_SIM_UDID` のデバイス**だけ**を使う。他のデバイスを作成・起動・削除しない
 - ビルド: `xcodebuild -destination "id=$WTX_SIM_UDID" -derivedDataPath .wtx-derived ...`
