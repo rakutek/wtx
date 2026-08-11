@@ -15,9 +15,6 @@ owner metadataはcleanupと監査のための来歴であり、wtxがRunやDispa
 ```bash
 wtx ensure NAME WORKDIR \
   --owner orca \
-  --owner-label run_id=run_123 \
-  --owner-label task_id=task_456 \
-  --owner-label dispatch_id=dispatch_789 \
   --json
 ```
 
@@ -52,12 +49,7 @@ wtx ensure NAME WORKDIR \
       "orphaned": false
     },
     "owner": {
-      "kind": "orca",
-      "labels": {
-        "dispatch_id": "dispatch_789",
-        "run_id": "run_123",
-        "task_id": "task_456"
-      }
+      "kind": "orca"
     },
     "ports": {}
   }
@@ -76,7 +68,34 @@ wtx exec NAME --tty -w WORKDIR claude
 `--tty`はSSHへ`-tt`を渡す。SSHがPTY、window resize、signalを中継し、wtxはremote processの
 終了コードをそのまま返す。非対話コマンドは従来どおり`--tty`なしで実行する。
 
+## agent開始のbarrier
+
+オーケストレータはworktree作成後、`wtx ensure ... --json`が成功してからagentを開始する。
+`worktree.created`のような事後eventだけに準備を委ねず、agent開始側がready receiptをbarrierとして扱う。
+失敗時はworktreeを残して理由を表示し、host Dockerへfallbackしない。
+
+- Orca: native setup hookで`wtx ensure "$ORCA_WORKTREE_PATH" --owner orca --json`を実行し、
+  agent startup policyを`wait-for-setup`にする
+- Herdr: `worktree create`のJSONからworktree pathとroot paneを取得し、親agentが
+  `wtx ensure WORKTREE_PATH --owner herdr --json`を待ってから、そのpaneで`agent start`する
+
+Orca/Herdrはagent、worktree、terminalを所有し続ける。wtxはagent開始やpane操作を行わない。
+
+## commandの実行場所
+
+coding agentとオーケストレータはhostで動かす。編集、検索、Git、GitHub操作もhostで行い、
+Docker、DB、service、container依存testだけを`wtx exec`でVMへ送る。Composeは置き換えず、
+VM内で通常の`docker compose`として実行する。host Dockerへのsilent fallbackは禁止する。
+
 ## cleanup
 
-オーケストレータ管理下では、まず`wtx rm NAME`でruntimeを消し、その後オーケストレータが
-worktreeを閉じる。`wtx rm --with-worktree`はwtx単独運用向けであり、Orca/Herdr管理下では使わない。
+オーケストレータ管理下では、まず`wtx rm NAME --if-exists --json`でruntimeを消し、その成功後に
+オーケストレータがworktreeを閉じる。この順序を逆にしない。cleanup失敗時はworktreeを残して
+再試行可能にする。
+
+`rm --if-exists --json`は、削除時に`action: deleted`、既に無い場合に`action: not_found`を返し、
+どちらも成功終了する。`wtx rm --with-worktree`はwtx単独運用向けであり、Orca/Herdr管理下では
+使わない。
+
+Orcaのarchive hookはUI操作時の安全網として同じcleanupを実行できるが、coding agentによる
+削除ではarchive hookだけに依存せず、先に明示的な`wtx rm`成功を確認する。

@@ -113,6 +113,27 @@ struct EnsureReceipt {
     instance: InstanceInspection,
 }
 
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RemoveAction {
+    Deleted,
+    NotFound,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoveReceipt<'a> {
+    schema_version: u32,
+    action: RemoveAction,
+    name: &'a str,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RemoveOpts {
+    pub with_worktree: bool,
+    pub if_exists: bool,
+    pub json: bool,
+}
+
 pub fn meta_path(name: &str) -> PathBuf {
     wtx_home().join(format!("{name}.json"))
 }
@@ -747,8 +768,20 @@ fn unpin_legacy_keep_refs(host_repo: &Path, name: &str) {
     }
 }
 
-pub fn rm(name: &str, with_worktree: bool) -> Result<()> {
+pub fn rm(name: &str, opts: RemoveOpts) -> Result<()> {
+    let action = remove_instance(name, opts)?;
+    print_remove_result(name, action, opts.json)
+}
+
+fn remove_instance(name: &str, opts: RemoveOpts) -> Result<RemoveAction> {
     let meta = load_meta(name);
+    let vm_exists = !lima_status_checked(name)?.is_empty();
+    if !vm_exists && meta.is_none() {
+        if !opts.if_exists {
+            return Err(anyhow!("no such wtx VM: {name}"));
+        }
+        return Ok(RemoveAction::NotFound);
+    }
     if let Some(m) = &meta {
         if !m.main_repo.is_empty() {
             unpin_legacy_keep_refs(Path::new(&m.main_repo), name);
@@ -757,44 +790,78 @@ pub fn rm(name: &str, with_worktree: bool) -> Result<()> {
     crate::sshx::close_all_forwards(name);
     if let Some(m) = &meta {
         if !m.sim_udid.is_empty() {
-            crate::sim::delete_device(&m.sim_udid);
-        }
-    }
-    limactl_capture(&["delete", "-f", name]).map_err(|e| anyhow!("limactl delete: {e}"))?;
-    let _ = std::fs::remove_file(wtx_home().join(format!("{name}.yaml")));
-    let _ = std::fs::remove_file(meta_path(name));
-
-    if with_worktree {
-        let Some(m) = meta else {
-            return Err(anyhow!(
-                "no metadata for {name}; cannot locate the worktree"
-            ));
-        };
-        // linked worktree のときだけ畳む。通常リポジトリで消すと本体を消してしまう。
-        if m.main_repo.is_empty() || m.main_repo == m.workdir {
-            eprintln!(
-                "wtx: {name} is not a linked worktree; left {} in place",
-                m.workdir
-            );
-        } else if !Path::new(&m.workdir).exists() {
-            eprintln!("wtx: worktree {} is already gone", m.workdir);
-        } else {
-            let st = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&m.main_repo)
-                .args(["worktree", "remove", "--force", &m.workdir])
-                .status()?;
-            if st.success() {
-                println!("removed worktree {}", m.workdir);
+            if opts.json {
+                crate::sim::delete_device_quietly(&m.sim_udid);
             } else {
-                eprintln!(
-                    "wtx: could not remove worktree {} (remove it manually)",
-                    m.workdir
-                );
+                crate::sim::delete_device(&m.sim_udid);
             }
         }
     }
+    if vm_exists {
+        limactl_capture(&["delete", "-f", name]).map_err(|e| anyhow!("limactl delete: {e}"))?;
+    }
+    remove_managed_file(&wtx_home().join(format!("{name}.yaml")))?;
+    remove_managed_file(&meta_path(name))?;
+
+    if opts.with_worktree {
+        remove_linked_worktree(name, meta.as_ref(), opts.json)?;
+    }
+    Ok(RemoveAction::Deleted)
+}
+
+fn remove_linked_worktree(name: &str, meta: Option<&InstanceMeta>, quiet: bool) -> Result<()> {
+    let m = meta.ok_or_else(|| anyhow!("no metadata for {name}; cannot locate the worktree"))?;
+
+    // linked worktree のときだけ畳む。通常リポジトリで消すと本体を消してしまう。
+    if m.main_repo.is_empty() || m.main_repo == m.workdir {
+        eprintln!(
+            "wtx: {name} is not a linked worktree; left {} in place",
+            m.workdir
+        );
+    } else if !Path::new(&m.workdir).exists() {
+        eprintln!("wtx: worktree {} is already gone", m.workdir);
+    } else {
+        let st = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&m.main_repo)
+            .args(["worktree", "remove", "--force", &m.workdir])
+            .status()?;
+        if st.success() {
+            if !quiet {
+                println!("removed worktree {}", m.workdir);
+            }
+        } else {
+            eprintln!(
+                "wtx: could not remove worktree {} (remove it manually)",
+                m.workdir
+            );
+        }
+    }
     Ok(())
+}
+
+fn print_remove_result(name: &str, action: RemoveAction, json: bool) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&RemoveReceipt {
+                schema_version: RECEIPT_SCHEMA_VERSION,
+                action,
+                name,
+            })?
+        );
+    } else if matches!(action, RemoveAction::NotFound) {
+        println!("not_found: {name}");
+    }
+    Ok(())
+}
+
+fn remove_managed_file(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(anyhow!("remove {}: {err}", path.display())),
+    }
 }
 
 /// worktree が消えた（孤児）VM を掃除する。コミットはホストの .git に直接刻まれている
@@ -813,7 +880,7 @@ pub fn prune(yes: bool) -> Result<()> {
             println!("  would delete {} (workdir gone: {})", i.name, i.workdir);
             continue;
         }
-        match rm(&i.name, false) {
+        match rm(&i.name, RemoveOpts::default()) {
             Ok(_) => println!("  deleted {}", i.name),
             Err(e) => println!("  failed to delete {}: {e}", i.name),
         }

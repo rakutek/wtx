@@ -66,6 +66,28 @@ pub fn lima_status(name: &str) -> String {
     limactl_out(&["list", name, "--format", "{{.Status}}"])
 }
 
+pub fn lima_status_checked(name: &str) -> Result<String> {
+    let out = Command::new("limactl")
+        .args(["list", "--format", "{{.Name}}\t{{.Status}}"])
+        .output()?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let detail = err
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("limactl list failed");
+        return Err(anyhow!("limactl list: {detail}"));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|line| {
+            let (instance, status) = line.split_once('\t')?;
+            (instance == name).then(|| status.to_string())
+        })
+        .unwrap_or_default())
+}
+
 pub fn git_out(dir: &Path, args: &[&str]) -> String {
     Command::new("git")
         .arg("-C")

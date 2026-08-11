@@ -208,6 +208,12 @@ enum Cmd {
         /// Also remove the linked git worktree the VM was created from
         #[arg(long)]
         with_worktree: bool,
+        /// Succeed when the VM is already absent
+        #[arg(long)]
+        if_exists: bool,
+        /// Machine-readable versioned receipt
+        #[arg(long)]
+        json: bool,
     },
     /// Delete VMs whose worktree no longer exists
     Prune {
@@ -339,7 +345,16 @@ fn run() -> Result<()> {
         Some(Cmd::Rm {
             name,
             with_worktree,
-        }) => lima::rm(&name, with_worktree),
+            if_exists,
+            json,
+        }) => lima::rm(
+            &name,
+            lima::RemoveOpts {
+                with_worktree,
+                if_exists,
+                json,
+            },
+        ),
         Some(Cmd::Prune { yes }) => lima::prune(yes),
         Some(Cmd::Image { action }) => match action.as_str() {
             "build" => lima::image_build(),
@@ -500,6 +515,25 @@ mod tests {
                 assert!(json);
             }
             _ => panic!("expected ensure"),
+        }
+    }
+
+    #[test]
+    fn idempotent_remove_contract_is_parsed() {
+        let cli = Cli::try_parse_from(["wtx", "rm", "vm-a", "--if-exists", "--json"]).unwrap();
+        match cli.cmd.unwrap() {
+            Cmd::Rm {
+                name,
+                with_worktree,
+                if_exists,
+                json,
+            } => {
+                assert_eq!(name, "vm-a");
+                assert!(!with_worktree);
+                assert!(if_exists);
+                assert!(json);
+            }
+            _ => panic!("expected rm"),
         }
     }
 }

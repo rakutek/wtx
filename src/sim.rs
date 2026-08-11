@@ -281,12 +281,21 @@ pub fn clone_device_with_output(
 
 /// VM 削除時・`sim rm` 時のデバイス削除（ベストエフォート）。Booted でも落としてから消す。
 pub fn delete_device(udid: &str) {
+    delete_device_with_output(udid, true);
+}
+
+pub fn delete_device_quietly(udid: &str) {
+    delete_device_with_output(udid, false);
+}
+
+fn delete_device_with_output(udid: &str, print_progress: bool) {
     if udid.is_empty() {
         return;
     }
     let _ = xcrun(&["simctl", "shutdown", udid]);
     match xcrun(&["simctl", "delete", udid]) {
-        Ok(_) => println!("deleted simulator {udid}"),
+        Ok(_) if print_progress => println!("deleted simulator {udid}"),
+        Ok(_) => {}
         Err(e) => eprintln!("wtx: could not delete simulator {udid}: {e}"),
     }
 }

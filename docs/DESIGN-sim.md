@@ -99,13 +99,15 @@ SIMCTL_CHILD_API_BASE_URL="http://127.0.0.1:$WTX_PORT_API" \
   xcrun simctl launch "$WTX_SIM_UDID" com.example.app
 ```
 
-## エージェントへの指定（Claude Code、codex、hermes）
+## エージェントへの指定
 
 「このworktreeではこのVMとこのシミュレータを使う」という指定の実体は、指示テキストとコマンドの組である。
 エージェントには次を指示する（この文面がそのまま配布物になる）。
 
 ```
-- セッション開始時に worktree ディレクトリで eval "$(wtx sim env)" を実行する。
+- shellから直接使う場合は、セッション開始時と長い待機・VM再起動後にworktreeディレクトリで
+  eval "$(wtx sim env)" を実行する。エージェントや外部ツールから使う場合は、操作開始の直前に
+  同じディレクトリで wtx sim env --json を実行し、sim_udidを解決する。
   ポートやUDIDは変わりうるのでセッションをまたいでキャッシュしない
 - シミュレータは $WTX_SIM_UDID のデバイスだけを使う。
   他のデバイスを作成・起動・削除しない
@@ -114,23 +116,37 @@ SIMCTL_CHILD_API_BASE_URL="http://127.0.0.1:$WTX_PORT_API" \
   xcrun simctl boot "$WTX_SIM_UDID" && xcrun simctl bootstatus "$WTX_SIM_UDID" -b
 - 起動: SIMCTL_CHILD_API_BASE_URL="http://127.0.0.1:$WTX_PORT_API" \
         xcrun simctl launch "$WTX_SIM_UDID" <bundle-id>
-- 操作: orca が使えるなら orca emulator attach "$WTX_SIM_UDID" --worktree "path:$PWD"、
-  無ければ xcrun simctl を直接使う
+- 操作: 外部ツールには担当UDIDを明示する。直接操作する場合もxcrun simctlへUDIDを渡す
 - VM側（db、api、docker）の作業は wtx exec "$(wtx which)" ... で行う
 - シミュレータ操作はホスト側でだけ可能。VM内シェル（wtx shell の中）に simctl は
   存在しないので、VM内で頼まれたら実行せずその旨を報告する
 ```
 
-配布はエージェントごとの慣習に乗せる。
+Argent、agent-browser、Xcode連携、Computer Useなどの外部ツールも、個別adapterではなく
+次の共通契約で扱う。
 
-- **Claude Code**：wtx同梱のスキル（`skills/wtx/SKILL.md`）にこの節を追記する
-- **hermes**：同じSKILL.md形式のスキルを読み込むので（`hermes skills` がskills.sh系レジストリとローカルスキルを扱うことを確認済み）、同じファイルがそのまま効く
-- **codex**：利用側リポジトリのAGENTS.mdに同文を置く
+1. 操作直前に対象worktreeの `wtx sim env --json` が返す空でない`sim_udid`を解決し、その作業で
+   唯一使用可能なSimulator IDとする。空なら操作を開始しない
+2. 外部ツールのhelp/schemaを確認し、完全なUDIDを渡せるtarget引数、UDID環境変数、
+   担当UDIDへbind済みのworktree専用session、対応を検証済みの専用window/viewの順でbindする
+3. device一覧は存在確認にだけ使い、先頭、`Booted`、active、focused、前回選択を暗黙に選ばない
+4. 常駐sessionはworktree単位で分離し、再接続時にも担当UDIDを再確認する
+5. targetが無い、消えた、または対応を検証できない場合は再解決し、別デバイスへfallbackしない
+6. cleanupは担当UDIDとworktree専用sessionだけに限定する
+7. 完全なUDIDも専用session/windowとの検証可能な対応も持たないツールは並列作業に使わない
 
-役割分担は従来方針のまま、wtxがライフサイクルとポート、orca emulatorが操作（tap、type、gesture、ax）を持つ。
-orcaにはworktree単位でデバイスをattachする概念が既にあり、wtxが作ったデバイスをUDIDでそのまま扱える。
+構造化CLI/MCPではUDID/device ID/destination field、browser automationでは完全なUDIDと
+worktree固有session、Computer Useでは担当デバイスだと検証できる専用window/viewに、この契約を
+投影する。field名は固定せず、各ツールのhelp/schemaで確認する。
+
+配布はエージェントごとの慣習に乗せる。SKILL.mdを読めるエージェントにはwtx同梱の
+`skills/wtx/SKILL.md`を使い、それ以外には利用側リポジトリのagent指示ファイルへ同じ契約を置く。
+
+役割分担は従来方針のまま、wtxがライフサイクル、所有identity、ポートを持ち、外部ツールが
+操作（tap、type、gesture、axなど）を持つ。
 wtxに `wtx sim tap` のような操作ラッパーは作らない。
-orca emulatorと重複するうえ、契約が `simctl` の素の語彙で表現できていれば、orcaを使わないエージェントも同じデバイスを直接扱えるからである。
+外部ツールと重複するうえ、UDIDという共通契約で表現できていれば、各エージェントが対応する
+CLI、MCP、browser、GUI操作を同じ安全規則で使えるからである。
 
 エージェントの置き場所は**ホスト側**（worktreeディレクトリ）を推奨形とする。
 VM内で動くエージェントからのシミュレータ操作は、`wtx bridge` でホスト側の操作エンドポイントを露出すれば原理的には可能だが、simctlそのものはVMから呼べないため、v1の対象外とする。

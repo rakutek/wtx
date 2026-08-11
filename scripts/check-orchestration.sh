@@ -75,4 +75,23 @@ assert len(d["instance"]["worktree"]["head"]) == 40
 '
 
 "$WTX" exec "$CHECK_VM" --tty bash -c 'test -t 0 && test -t 1'
+
+REMOVED=$("$WTX" rm "$CHECK_VM" --if-exists --json)
+printf '%s' "$REMOVED" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["schema_version"] == 1
+assert d["action"] == "deleted"
+assert d["name"] == sys.argv[1]
+' "$CHECK_VM"
+
+MISSING=$("$WTX" rm "$CHECK_VM" --if-exists --json)
+printf '%s' "$MISSING" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["schema_version"] == 1
+assert d["action"] == "not_found"
+assert d["name"] == sys.argv[1]
+' "$CHECK_VM"
+
 echo "P0 orchestration contract: PASS"

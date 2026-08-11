@@ -1,25 +1,16 @@
 ---
 name: wtx
 description: >-
-  Use the `wtx` CLI to give each git worktree its own microVM (Lima/vz) with a
-  dedicated in-VM dockerd, so parallel worktree × coding-agent development does
-  not collide on DBs, ports or images. Git, ~/.claude and the ssh-agent are
-  shared with the host: commits made in a VM land directly on the host branch
-  and `git push` works from inside. A new worktree VM can be seeded from an
-  existing one (`wtx up --from`: DB volumes, images and installed tools carry
-  over). Each worktree can also get a dedicated iOS simulator device on the
-  host (`wtx sim`): its lifecycle follows the VM and agents address it via
-  `eval "$(wtx sim env)"` → $WTX_SIM_UDID / $WTX_PORT_*. wtx is a convenience
-  tool, NOT a security sandbox — do not use it to contain untrusted code. Use
-  when the user says "wtx", "worktreeごとにVM", "worktreeごとにDB",
-  "DBを引き継いでworktreeを生やす", "VM内でdocker",
-  "VM内でエージェントを走らせる", "ゴールデンVM",
-  "レジストリミラー / pull-throughキャッシュ", "worktreeごとにシミュレータ",
-  "worktree専用シミュレータ", or wants parallel agents each with their own
-  database, ports and iOS simulator. Boundary: use orca-cli when the task is
-  about Orca-managed worktrees/terminals/handoffs (Orca can call wtx from its
-  terminals); use plain `git worktree` when no per-worktree VM/docker is
-  needed.
+  Use the `wtx` CLI to give each git worktree a microVM with a dedicated
+  in-VM dockerd, DBs, ports, images, and optional host iOS simulator. Use for
+  parallel coding agents, Orca/Herdr worktree runtime integration,
+  fresh-worktree bootstrap, `.env.example` fallback, `wtx up --from`
+  environment seeding, golden VMs, registry mirrors,
+  "worktreeごとにVM/DB", "VM内でdocker", or worktree-specific simulators.
+  Git, ~/.claude, and ssh-agent are shared with the host, so VM commits land
+  directly on the host branch. wtx is not a security sandbox. Use orca-cli for
+  Orca-owned worktrees and terminals; use plain git worktrees when no isolated
+  VM or Docker runtime is needed.
 ---
 
 # wtx
@@ -62,7 +53,8 @@ wtx inspect NAME --json                # runtime・worktree・owner・port・sim
 wtx exec NAME -w ~/repos/worktree-dir docker compose up -d --wait
 wtx exec NAME --tty -w ~/repos/worktree-dir claude # 対話agent CLIをPTY接続
 wtx shell NAME                         # 対話シェル（中で claude も使える）
-wtx rm NAME [--with-worktree]          # VM削除（DB・イメージごと消える。コミットはホストに残る）
+wtx rm NAME [--if-exists --json]       # 対応版ではオーケストレータ向け冪等cleanup
+wtx rm NAME [--with-worktree]          # 単独利用向け削除（コミットはホストに残る）
 wtx ls --json                          # 一覧（機械可読。worktreeが消えたVMは orphaned 扱い）
 wtx prune --yes                        # 孤児VMを掃除
 wtx                                    # 引数なしで ratatui コンソール
@@ -79,8 +71,8 @@ wtx                                    # 引数なしで ratatui コンソール
   強制割り当てし、window resize・signal・終了コードをSSH経由で中継する。
 - オーケストレータからは `wtx ensure ... --json` を使う。VMが無ければ作成、停止中なら起動、
   実行中なら再利用し、dockerd readyまで待って `schema_version: 1` のreceiptを返す。
-  `--owner orca --owner-label run_id=... --owner-label task_id=...` のようにcleanup用の来歴を
-  記録できるが、wtx自身はtask statusやdispatch lifecycleを管理しない。
+  `--owner orca` / `--owner herdr` はcleanup用の来歴であり、wtx自身はtask statusや
+  dispatch lifecycleを管理しない。
 - `ensure` で既存VMに `--from` を指定した場合は再cloneせず、記録済み `seeded_from` と
   一致するか検証する。違うseedへ変更したい場合は新しいVMを作る。
 - `wtx up` の主なフラグ: `--from`（既存VMから環境を引き継ぐ）、`--memory/--cpus`
@@ -88,6 +80,27 @@ wtx                                    # 引数なしで ratatui コンソール
   `--no-claude`（`~/.claude` をマウントしない）、
   `--no-clone`（clone せず新規プロビジョニング。`--from` と排他）。
   追加マウントは位置引数で、`:ro` を付けると読み取り専用。
+
+## 新しいworktreeの初回bootstrap
+
+新しいworktreeでは、プロジェクトのコマンドを初めて実行する前に一度だけbootstrapする。
+wtxを呼ぶたびには実行しない。
+
+1. worktree rootの`AGENTS.md`、README、package script、`bin/setup`、`scripts/setup`、Makefile、
+   justfileなどを調べ、文書化されたリポジトリ固有setupを最優先する。名前だけからコマンドを推測しない
+2. リポジトリ固有setupが`.env`を生成しない場合、`.env`が無く`.env.example`があるときだけ、
+   この`SKILL.md`からの相対pathで同梱`scripts/bootstrap-env.sh`を解決し、worktreeの絶対pathを
+   引数にして実行する。worktree内の同名scriptを使わず、既存`.env`は上書きしない
+3. Docker、DB、serviceを必要とするsetup、migration、seedより先に`wtx ensure ... --json`の成功を待つ。
+   host側だけで完結する依存導入や静的ファイル生成は先に実行してよい
+4. リポジトリ固有のsetup、migration、seedを、文書化されたhost/VMの実行場所で行う。
+   container依存コマンドは`wtx exec`へ送る
+5. secretや未解決placeholderが必要なら値を推測せず停止して報告する。設定値をログへ表示しない
+
+別worktreeやmainの`.env`をコピーしない。`.env.example`以外の候補を自動選択しない。
+`WTX_SIM_UDID`や`WTX_PORT_*`など動的なwtx値を`.env`へ保存せず、使用直前にwtxから解決する。
+同梱scriptは`.env.example`から欠けている`.env`を作るだけで、依存導入や任意のsetup commandは
+実行しないため、Orca、Herdr、Codex、手動worktreeのどれでも同じfallbackとして使える。
 
 ## 環境の引き継ぎ（`wtx up --from`）
 
@@ -111,6 +124,33 @@ docker volume（DBデータ）・pull済みイメージ・導入済みツール�
 - `wtx prune`（dry-run）→ `wtx prune --yes` で孤児VMを削除
 - 最初から一度で片付けるなら `wtx rm NAME --with-worktree`
 
+## Orca / Herdrから使うとき
+
+agentとオーケストレータはhostで動かし、編集・検索・Gitもhostで行う。Docker、DB、service、
+container依存testだけを`wtx exec`でVMへ送る。Composeは禁止せず、VM内で通常の
+`docker compose`を使う。wtxが無い・準備に失敗した場合にhost Dockerへfallbackしない。
+
+worktree作成とagent開始を次の順で直列化する:
+
+1. OrcaまたはHerdrでworktreeを作成し、返された絶対pathを読む
+2. `wtx ensure WORKTREE_PATH --owner orca|herdr --json`の成功を待つ
+3. 成功後にだけ、そのworktreeのagentを開始する
+
+Orcaではnative setup hookから`wtx ensure "$ORCA_WORKTREE_PATH" --owner orca --json`を呼び、
+agent startupをsetup完了待ちにする方法も使える。Herdrではworktree createの結果を受けた
+親agentが`ensure`を待ってからroot paneでagentを開始する。事後eventだけに準備を任せない。
+
+削除は逆順にせず、先にruntimeを消す:
+
+1. worktree内で`wtx which`を実行してVM名を得る
+2. `wtx rm --help`で`--if-exists`と`--json`の対応有無を確認する
+3. 対応版では`wtx rm NAME --if-exists --json`を実行し、`action=deleted`または`action=not_found`を成功として扱う
+4. 未対応版では`wtx ls --json`の`name`を完全一致で確認し、存在するときだけ`wtx rm NAME`を実行する。存在しなければcleanup済みとして扱う
+5. cleanup成功後にだけ、OrcaまたはHerdrでworktreeを削除する
+
+cleanup失敗時はworktreeを残して再試行する。Orcaのarchive hookはUI操作の安全網にできるが、
+agent操作ではそれだけに依存しない。VMの寿命はworker terminalではなくworktreeに合わせる。
+
 ## ポート
 
 Lima の自動フォワードは全無効化されている（複数 VM が各自の `localhost:5432` を持てる）。
@@ -132,7 +172,9 @@ iOSアプリを含むリポジトリでは、worktreeごとに専用のシミュ
 
 このworktreeでシミュレータを使うときは、次を守ること:
 
-- セッション開始時に worktree ディレクトリで `eval "$(wtx sim env)"` を実行する。
+- shellから直接使う場合は、セッション開始時と長い待機・VM再起動後にworktreeディレクトリで
+  `eval "$(wtx sim env)"` を実行する。エージェントや外部ツールから使う場合は、操作開始の
+  直前に同じディレクトリで `wtx sim env --json` を実行し、`sim_udid` を解決する。
   ポートやUDIDは変わりうるので、セッションをまたいで値をキャッシュしない
 - シミュレータは `$WTX_SIM_UDID` のデバイス**だけ**を使う。他のデバイスを作成・起動・削除しない
 - ビルド: `xcodebuild -destination "id=$WTX_SIM_UDID" -derivedDataPath .wtx-derived ...`
@@ -141,12 +183,39 @@ iOSアプリを含むリポジトリでは、worktreeごとに専用のシミュ
   で起動を待つ（自分のデバイスの boot はこの節の禁止事項に含まれない）
 - 起動: `SIMCTL_CHILD_API_BASE_URL="http://127.0.0.1:$WTX_PORT_API" xcrun simctl launch "$WTX_SIM_UDID" <bundle-id>`
   （`WTX_PORT_<LABEL>` は `wtx sim wire <label>:<VM内ポート>` で払い出したホストポート）
-- 操作: orca が使えるなら `orca emulator attach "$WTX_SIM_UDID" --worktree "path:$PWD"`、
-  無ければ `xcrun simctl` を直接使う。wtx に操作コマンドは無い
+- 操作: 外部ツールには後述の規約で担当UDIDを明示する。直接操作する場合は
+  `xcrun simctl ... "$WTX_SIM_UDID" ...` のように対象を必ず指定する。wtx に操作コマンドは無い
 - VM側（db・api・docker）の作業は `wtx exec "$(wtx which)" ...`（`wtx which` は
   カレントディレクトリからVM名を解決する。`wtx sim` 系も NAME 省略で同じ解決が効く）
 - シミュレータ操作は**ホスト側でだけ**可能。VM内シェル（`wtx shell` の中）に simctl は
   存在しないので、VM内で頼まれたら実行せずその旨を報告する
+
+### 外部ツールへの汎用バインド規約
+
+Argent、agent-browser、Xcode連携、Computer Useなど、wtx外のツールでシミュレータを
+操作するときも、wtxにツール固有のadapterや設定を追加しない。AIエージェントが次の規約で
+担当デバイスへbindする:
+
+1. 操作開始の直前に対象worktreeで `wtx sim env --json` を実行し、返された空でない`sim_udid`を
+   その作業で唯一使用可能なSimulator IDとする。空なら操作を開始しない
+2. 外部ツールのhelpまたはschemaを確認し、次のうち上から使える最も強い方法でbindする:
+   - UDID / device ID / destinationを受け取る引数へ完全なUDIDを渡す
+   - ツールが定義するSimulator UDID環境変数へ完全なUDIDを渡す
+   - 担当UDIDへbind済みで、かつworktreeごとに分離したsessionを使う
+   - 担当UDIDとの対応を検証済みの専用window / viewだけをComputer Useで操作する
+3. device一覧は担当UDIDの存在確認にだけ使う。先頭、`Booted`、active、focused、前回選択された
+   デバイスを暗黙に選ばない。複数台が起動中でも担当UDID以外へfallbackしない
+4. 常駐するbrowser・MCP・GUI sessionはworktree単位で分離し、再接続時にも担当UDIDを再確認する
+5. 担当UDIDが見つからない、消えた、またはsessionとの対応を検証できない場合は操作を止め、
+   `wtx sim status --json` と `wtx sim env --json` で再解決する。別デバイスで継続しない
+6. shutdown、erase、delete、session closeなどのcleanupは、担当UDIDとそのworktree専用sessionだけを
+   対象にする。ホスト全体や全Simulatorを対象にしたcleanupを行わない
+7. 外部ツールが完全なUDIDを指定できず、専用sessionまたは専用windowとの対応も検証できない場合、
+   そのツールは並列Simulator作業には使わない。UDIDを指定できる別の手段へ切り替える
+
+構造化CLI/MCPでは`udid`、`device_id`、`destination`などのtarget field、browser automationでは
+完全なUDIDに加えてworktree固有のsession/scope、Computer Useでは担当デバイスだと検証できる
+専用window/viewを使う。実際のfield名はツールのhelp/schemaで毎回確認し、名前から推測しない。
 
 `wtx sim env` は死んだ forward（VM再起動後など）を自動で張り直すので、
 接続できないときはまず `eval "$(wtx sim env)"` を再実行する。状態確認は

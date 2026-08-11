@@ -251,7 +251,7 @@ impl App {
             let result = match verb {
                 "start" => crate::util::limactl_capture(&["start", &name, "--tty=false"]),
                 "stop" => crate::util::limactl_capture(&["stop", &name]),
-                _ => lima::rm(&name, false).map_err(|e| e.to_string()),
+                _ => lima::rm(&name, lima::RemoveOpts::default()).map_err(|e| e.to_string()),
             };
             let _ = tx.send(Msg::OpDone { name, verb, result });
         });

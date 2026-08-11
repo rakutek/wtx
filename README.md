@@ -199,8 +199,11 @@ included — by `--from`.
 `wtx sim wire api:3000` allocates a host port (42000+, recorded) for a VM port. Agents run
 `eval "$(wtx sim env)"` inside the worktree and use `$WTX_SIM_UDID` / `$WTX_PORT_API`.
 `NAME` can be omitted everywhere — it resolves from the current directory (`wtx which`
-does the same). wtx deliberately ships no tap/UI automation; drive the device with
-`xcrun simctl` or your tool of choice. Design notes: [docs/DESIGN-sim.md](docs/DESIGN-sim.md)
+does the same). Before invoking an external tool, an agent resolves `sim_udid` with
+`wtx sim env --json` and explicitly binds that UDID, or a verified worktree-scoped
+session/window, without falling back to the first, booted, active, or focused device.
+wtx deliberately ships no tap/UI automation or tool-specific adapters. Design notes:
+[docs/DESIGN-sim.md](docs/DESIGN-sim.md)
 (Japanese) and VERIFICATION.md Phase 9.
 
 ### TUI console (`wtx` / `wtx tui`)
@@ -255,7 +258,7 @@ there is no collection step. The evaluation notes are in
 | `wtx bridge NAME GUEST:HOST` | Expose a host port inside the VM (ssh -R) |
 | `wtx unforward NAME PORT` | Tear down a forward/bridge |
 | `wtx stop NAME` | Stop a VM |
-| `wtx rm NAME [--with-worktree]` | Delete a VM (and optionally its linked worktree) |
+| `wtx rm NAME [--if-exists] [--json] [--with-worktree]` | Delete a VM with an idempotent cleanup receipt or optional linked-worktree removal |
 | `wtx prune [--yes]` | Delete VMs whose worktree no longer exists |
 | `wtx image build\|rm\|status` | Manage the golden VM |
 | `wtx mirror install\|uninstall\|up\|down\|status` | Manage the registry cache |
@@ -271,9 +274,6 @@ worker, let the orchestrator own tasks/worktrees and let wtx own only runtime st
 ```bash
 wtx ensure worker-a /abs/worktree \
   --owner orca \
-  --owner-label run_id=run_123 \
-  --owner-label task_id=task_456 \
-  --owner-label dispatch_id=dispatch_789 \
   --json
 wtx inspect worker-a --json
 wtx exec worker-a --tty -w /abs/worktree claude
@@ -282,9 +282,15 @@ wtx exec worker-a --tty -w /abs/worktree claude
 `ensure` is idempotent: it creates a missing VM, starts a stopped VM, or reuses a running
 one, then waits for dockerd. Creation-only `--from` is checked against recorded provenance
 on an existing VM rather than cloning again. JSON receipts carry `schema_version: 1`.
-Owner labels are opaque cleanup/audit metadata; wtx does not own task status or dispatch.
+Owner metadata records cleanup/audit provenance; wtx does not own task status or dispatch.
 The stable boundary and receipt schema are documented in
 [docs/DESIGN-orchestration.md](docs/DESIGN-orchestration.md) (Japanese).
+
+For Orca and Herdr, wait for `ensure` to succeed after worktree creation and before agent
+startup. During cleanup, run `wtx rm NAME --if-exists --json` first and remove the
+orchestrator-owned worktree only after it succeeds. Keep agents, edits, and Git on the host;
+send Docker, databases, services, and container-dependent tests through `wtx exec`. Use
+ordinary Docker Compose inside the VM and never silently fall back to host Docker.
 
 Additional integration points:
 
@@ -298,6 +304,11 @@ An agent skill ([skills/wtx/SKILL.md](skills/wtx/SKILL.md)) installs with:
 ```bash
 npx skills add rakutek/wtx
 ```
+
+On a fresh worktree, the skill prefers the repository's documented setup and only uses its
+bundled fallback to create a missing `.env` from `.env.example`. It never overwrites an
+existing `.env`, copies one from another worktree, guesses secrets, or persists dynamic
+`WTX_*` values, so repositories need no wtx-specific environment configuration.
 
 ## Verified on real VMs
 

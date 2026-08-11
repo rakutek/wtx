@@ -172,7 +172,9 @@ blob は digest で不変なのでディスクにキャッシュし、manifest �
 `wtx sim wire api:3000` で VM 内ポートをホストへ払い出す（42000〜、記録式）。
 エージェントは worktree 内で `eval "$(wtx sim env)"` を実行し、`$WTX_SIM_UDID` と `$WTX_PORT_API` を使う。
 NAME はどこでも省略可能で、カレントディレクトリから解決される（`wtx which` も同じ）。
-tap などの操作は wtx には持たせず、`xcrun simctl` などに任せる。
+外部ツールを使うエージェントは操作直前に `wtx sim env --json` の`sim_udid`を解決し、
+そのUDIDまたは検証済みのworktree専用session/windowへ明示的にbindする。先頭・起動中・
+focusedのデバイスへ暗黙にfallbackしない。tapなどの操作やツール別adapterはwtxに持たせない。
 設計と検証は [docs/DESIGN-sim.md](docs/DESIGN-sim.md) と VERIFICATION.md フェーズ9。
 
 ### TUI コンソール（`wtx` / `wtx tui`）
@@ -222,7 +224,7 @@ wtx は OSS スタック（Lima）でアカウント不要、ホストの `.git`
 | `wtx bridge NAME GUEST:HOST` | ホストのポートを VM 内へ届ける（ssh -R） |
 | `wtx unforward NAME PORT` | forward / bridge の解除 |
 | `wtx stop NAME` | VM を停止 |
-| `wtx rm NAME [--with-worktree]` | VM を削除（linked worktree もまとめて削除可） |
+| `wtx rm NAME [--if-exists] [--json] [--with-worktree]` | VMを削除。冪等cleanup receipt、またはlinked worktreeの同時削除に対応 |
 | `wtx prune [--yes]` | worktree が消えた VM をまとめて削除 |
 | `wtx image build\|rm\|status` | ゴールデン VM の管理 |
 | `wtx mirror install\|uninstall\|up\|down\|status` | レジストリキャッシュの管理 |
@@ -237,9 +239,6 @@ wtx は何にも依存しない。監督付きworkerでは、task/worktreeはオ
 ```bash
 wtx ensure worker-a /abs/worktree \
   --owner orca \
-  --owner-label run_id=run_123 \
-  --owner-label task_id=task_456 \
-  --owner-label dispatch_id=dispatch_789 \
   --json
 wtx inspect worker-a --json
 wtx exec worker-a --tty -w /abs/worktree claude
@@ -247,9 +246,14 @@ wtx exec worker-a --tty -w /abs/worktree claude
 
 `ensure` は、VMが無ければ作成、停止中なら起動、実行中なら再利用し、dockerd readyまで待つ。
 既存VMに対する作成専用の`--from`は再cloneせず、記録済みseedと一致するか検証する。
-JSON receiptは`schema_version: 1`を持つ。owner labelはcleanup・監査用の不透明なmetadataであり、
+JSON receiptは`schema_version: 1`を持つ。owner metadataはcleanup・監査用の来歴であり、
 wtx自身はtask statusやdispatchを管理しない。
 境界とreceipt schemaの詳細は[docs/DESIGN-orchestration.md](docs/DESIGN-orchestration.md)。
+
+Orca/Herdrでは、worktree作成後に`ensure`の成功を待ってからagentを開始する。削除時は先に
+`wtx rm NAME --if-exists --json`を成功させ、その後にオーケストレータ側のworktreeを削除する。
+agent・編集・Gitはhost、Docker・DB・service・container依存testは`wtx exec`先で実行し、
+ComposeはVM内で通常どおり使う。host Dockerへのsilent fallbackは行わない。
 
 その他の連携点:
 
@@ -262,6 +266,10 @@ wtx自身はtask statusやdispatchを管理しない。
 ```bash
 npx skills add rakutek/wtx
 ```
+
+新しいworktreeでは、このスキルがリポジトリ固有setupを優先し、必要な場合だけ同梱scriptで
+`.env.example`から欠けている`.env`を生成する。既存`.env`の上書き、別worktreeからのコピー、
+secretの推測、動的な`WTX_*`値の保存は行わないため、リポジトリごとのwtx設定は不要。
 
 ## 実機検証
 
