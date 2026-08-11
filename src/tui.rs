@@ -4,6 +4,7 @@
 //! スレッドで実行し、UIは操作中も止まらない。
 use crate::lima::{self, Instance};
 use crate::mirror;
+use crate::update::UpdateStatus;
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
@@ -38,6 +39,7 @@ enum Msg {
         verb: &'static str,
         result: std::result::Result<(), String>,
     },
+    UpdateChecked(UpdateStatus),
 }
 
 // 列幅。ヘッダー行の先頭4桁 = 枠(1) + 選択記号(1) + VM行の字下げ(2) に合わせてある。
@@ -67,6 +69,7 @@ struct App {
     /// 実行中の操作（VM名 → (verb, 開始時刻)）。対象VMへの二重操作を防ぐ。
     in_flight: HashMap<String, (&'static str, Instant)>,
     refreshing: bool,
+    update_available: Option<UpdateStatus>,
     tx: Sender<Msg>,
 }
 
@@ -105,7 +108,7 @@ fn fetch_state() -> (Vec<Instance>, BTreeMap<String, String>, String) {
 }
 
 impl App {
-    fn new(tx: Sender<Msg>) -> Self {
+    fn new(tx: Sender<Msg>, update_available: Option<UpdateStatus>) -> Self {
         let mut a = App {
             instances: vec![],
             rows: vec![],
@@ -119,6 +122,7 @@ impl App {
             sim_states: BTreeMap::new(),
             in_flight: HashMap::new(),
             refreshing: false,
+            update_available,
             tx,
         };
         // 初回だけ同期で取得し、最初のフレームから中身を出す（--snapshot もこれに依存）
@@ -287,6 +291,9 @@ impl App {
                 self.refreshing = false;
                 self.spawn_refresh();
             }
+            Msg::UpdateChecked(status) => {
+                self.update_available = status.update_available.then_some(status);
+            }
         }
     }
 }
@@ -295,7 +302,7 @@ impl App {
 pub fn snapshot() -> Result<()> {
     let mut term = Terminal::new(ratatui::backend::TestBackend::new(100, 18))?;
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(tx);
+    let mut app = App::new(tx, None);
     term.draw(|f| draw(f, &mut app))?;
     let buf = term.backend().buffer().clone();
     for y in 0..buf.area.height {
@@ -322,7 +329,15 @@ pub fn run() -> Result<()> {
 
 fn event_loop<B: Backend + std::io::Write>(term: &mut Terminal<B>) -> Result<()> {
     let (tx, rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel();
-    let mut app = App::new(tx);
+    let (cached_update, should_check) = crate::update::tui_state();
+    let mut app = App::new(tx.clone(), cached_update);
+    if should_check {
+        std::thread::spawn(move || {
+            if let Ok(status) = crate::update::check() {
+                let _ = tx.send(Msg::UpdateChecked(status));
+            }
+        });
+    }
     loop {
         let mut need_clear = false;
         while let Ok(m) = rx.try_recv() {
@@ -438,14 +453,24 @@ fn draw(f: &mut Frame, app: &mut App) {
     ])
     .split(f.area());
 
-    let mut title = vec![
-        Span::styled(
-            " wtx ",
-            Style::new().bold().bg(Color::Cyan).fg(Color::Black),
-        ),
-        Span::raw("  "),
-        Span::styled(app.mirror_line.clone(), Style::new().fg(Color::DarkGray)),
-    ];
+    let mut title = vec![Span::styled(
+        " wtx ",
+        Style::new().bold().bg(Color::Cyan).fg(Color::Black),
+    )];
+    if let Some(update) = &app.update_available {
+        title.push(Span::styled(
+            format!(
+                "  ↑ v{} available — brew upgrade wtx",
+                update.latest_version
+            ),
+            Style::new().fg(Color::Yellow),
+        ));
+    }
+    title.push(Span::raw("  "));
+    title.push(Span::styled(
+        app.mirror_line.clone(),
+        Style::new().fg(Color::DarkGray),
+    ));
     if app.refreshing {
         title.push(Span::styled("  ⟳", Style::new().fg(Color::DarkGray)));
     }

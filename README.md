@@ -62,6 +62,8 @@ the host branch itself, and `git push` and `claude` just work. No Docker Desktop
 - 📱 **Per-worktree iOS simulators** — `wtx sim` pairs a dedicated simulator device with
   each worktree's VM and hands agents its UDID and ports as env vars
 - 🖥️ **A TUI console** — one screen for every VM, grouped by project, plus mirror health
+- ⬆️ **Quiet update checks** — explicit with `wtx update check`; the interactive TUI uses a
+  24-hour cache and never turns ordinary commands into network calls
 
 > [!WARNING]
 > **wtx is a convenience tool, not a security sandbox.** The VM separates docker, ports,
@@ -220,7 +222,23 @@ start / stop / delete and state polling run in the background, so the UI never b
 the affected VM shows a spinner with elapsed seconds in its STATUS cell, and you can keep
 navigating (or quit) while an operation is in flight.
 
+The interactive TUI also checks GitHub Releases in the background at most once every 24
+hours and shows `brew upgrade wtx` only when a newer stable release exists. Failures stay
+silent. `wtx tui --snapshot` never checks or displays update notices.
+
 The CLI and TUI are fully English — output, help, and labels.
+
+### Update checks
+
+Run `wtx update check` for an explicit check, or add `--json` for a versioned machine-readable
+result. Ordinary commands never perform an update request. Set `WTX_NO_UPDATE_CHECK=1` to
+disable the TUI's background check. wtx does not self-update; Homebrew remains responsible
+for installation and upgrades:
+
+```bash
+wtx update check --json
+brew upgrade wtx
+```
 
 ## Why not …?
 
@@ -265,6 +283,7 @@ there is no collection step. The evaluation notes are in
 | `wtx which` | Print the VM name for the current worktree (composable) |
 | `wtx completions SHELL` | Print shell completions (bash, zsh, fish, elvish, powershell) |
 | `wtx sim create\|status\|wire\|env\|rm` | Per-worktree iOS simulator |
+| `wtx update check [--json]` | Check GitHub Releases for a newer version without installing it |
 
 ## Working with orchestrators and agents
 

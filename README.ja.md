@@ -53,6 +53,7 @@ Docker Desktop は不要。
 - 📦 **内蔵レジストリキャッシュ**：pull-through キャッシュを wtx 自身が実装（Docker 不要）。launchd がオンデマンド起動し、常駐プロセスなし
 - 📱 **worktree 専用 iOS シミュレータ**：`wtx sim` が worktree ごとの専用デバイスを VM と対にし、UDID とポートを環境変数でエージェントに渡す
 - 🖥️ **TUI コンソール**：全 VM をプロジェクトごとにまとめ、ミラーの稼働状況とともに1画面で操作する
+- ⬆️ **静かな更新確認**：明示実行は `wtx update check`。対話TUIは24時間cacheを使い、通常コマンドでは通信しない
 
 > [!WARNING]
 > **wtx は便利ツールであり、セキュリティサンドボックスではない。**
@@ -189,7 +190,22 @@ worktree を複数切っているプロジェクトはまとめて並び、リ�
 start / stop / delete と状態ポーリングはバックグラウンドで走るので、UI は固まらない。
 操作中の VM は STATUS 欄にスピナーと経過秒数を表示し、その間も他の行の操作や終了ができる。
 
+対話TUIはGitHub Releasesも24時間に最大1回だけバックグラウンド確認し、新しい安定版がある場合だけ
+`brew upgrade wtx`を表示する。失敗は表示しない。`wtx tui --snapshot`は更新確認も通知表示もしない。
+
 CLI の出力、ヘルプ、TUI のラベルはすべて英語。
+
+### 更新確認
+
+明示的に確認するときは`wtx update check`、agentやscriptからはversion付きmachine-readable結果を返す
+`wtx update check --json`を使う。通常コマンドは更新確認の通信をしない。
+`WTX_NO_UPDATE_CHECK=1`でTUIのバックグラウンド確認も無効化できる。wtx自身は更新を行わず、
+インストールと更新はHomebrewに任せる。
+
+```bash
+wtx update check --json
+brew upgrade wtx
+```
 
 ## なぜ既存の方法ではだめか
 
@@ -231,6 +247,7 @@ wtx は OSS スタック（Lima）でアカウント不要、ホストの `.git`
 | `wtx which` | カレント worktree の VM 名を表示（他コマンドと組み合わせ可） |
 | `wtx completions SHELL` | シェル補完を出力（bash, zsh, fish など） |
 | `wtx sim create\|status\|wire\|env\|rm` | worktree 専用 iOS シミュレータ |
+| `wtx update check [--json]` | GitHub Releasesの新しいversionを確認（インストールはしない） |
 
 ## オーケストレータ（Orca 等）との連携方針
 

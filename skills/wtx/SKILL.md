@@ -6,6 +6,7 @@ description: >-
   parallel coding agents, Orca/Herdr worktree runtime integration,
   fresh-worktree bootstrap, `.env.example` fallback, `wtx up --from`
   environment seeding, golden VMs, registry mirrors,
+  release update checks,
   "worktreeごとにVM/DB", "VM内でdocker", or worktree-specific simulators.
   Git, ~/.claude, and ssh-agent are shared with the host, so VM commits land
   directly on the host branch. wtx is not a security sandbox. Use orca-cli for
@@ -58,6 +59,7 @@ wtx rm NAME [--with-worktree]          # 単独利用向け削除（コミット
 wtx ls --json                          # 一覧（機械可読。worktreeが消えたVMは orphaned 扱い）
 wtx prune --yes                        # 孤児VMを掃除
 wtx                                    # 引数なしで ratatui コンソール
+wtx update check --json                # 新しい安定版を明示確認（更新はしない）
 ```
 
 - VM内でコミットすると**そのままホストのブランチが進む**。回収の手順（旧 `wtx sync`）は
@@ -234,6 +236,14 @@ wtx mirror [status|serve|up|down|install|uninstall] # 省略時 status
 - `~/.wtx/mirrors.json` を編集したら `wtx mirror install` を再実行する。
 - ゴールデンVMには Hub ミラーポート設定と `ssh.forwardAgent` が焼き込まれる。
   変えたら `wtx image rm && wtx image build`。
+
+## 更新確認
+
+- ユーザーがversion確認を求めたときだけ`wtx update check --json`を実行し、構造化結果を読む。
+- 通常コマンドは更新確認の通信をしない。対話TUIだけが24時間cache付きで非同期確認する。
+  `wtx tui --snapshot`は確認も通知表示もしない。
+- TUI確認を無効化する場合は`WTX_NO_UPDATE_CHECK=1`。wtxにself-update機能はないため、
+  更新を頼まれた場合は結果を示して`brew upgrade wtx`を案内し、勝手に実行しない。
 
 ## エージェント運用のヒント
 

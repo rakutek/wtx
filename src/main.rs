@@ -9,6 +9,7 @@ mod repo;
 mod sim;
 mod sshx;
 mod tui;
+mod update;
 mod util;
 
 use anyhow::{anyhow, Result};
@@ -240,6 +241,11 @@ enum Cmd {
         #[command(subcommand)]
         action: Option<SimCmd>,
     },
+    /// Check GitHub Releases for a newer wtx version
+    Update {
+        #[command(subcommand)]
+        action: UpdateCmd,
+    },
 }
 
 /// NAME はすべて省略可能で、省略時はカレントディレクトリの worktree から解決する。
@@ -268,6 +274,16 @@ enum SimCmd {
     },
     /// Delete the simulator device (the VM stays)
     Rm { name: Option<String> },
+}
+
+#[derive(Subcommand)]
+enum UpdateCmd {
+    /// Check for a newer release (never installs it)
+    Check {
+        /// Machine-readable versioned result
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() {
@@ -391,6 +407,9 @@ fn run() -> Result<()> {
                 mirror::status();
                 Ok(())
             }
+        },
+        Some(Cmd::Update { action }) => match action {
+            UpdateCmd::Check { json } => update::check_and_print(json),
         },
     }
 }
@@ -534,6 +553,17 @@ mod tests {
                 assert!(json);
             }
             _ => panic!("expected rm"),
+        }
+    }
+
+    #[test]
+    fn update_check_machine_contract_is_parsed() {
+        let cli = Cli::try_parse_from(["wtx", "update", "check", "--json"]).unwrap();
+        match cli.cmd.unwrap() {
+            Cmd::Update {
+                action: UpdateCmd::Check { json },
+            } => assert!(json),
+            _ => panic!("expected update check"),
         }
     }
 }
