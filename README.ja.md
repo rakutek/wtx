@@ -49,6 +49,7 @@ Docker Desktop は不要。
 - 🌱 **環境ごと引き継ぐ**：`wtx up --from` は既存 VM を clone し、docker volume（DB データ）、pull 済みイメージ、導入済みツールを持ち越す
 - 🔀 **回収の儀式なし**：ホストの `.git` を読み書きマウントする。VM 内のコミットは直接ホストのブランチに乗るので、VM を消しても作業が失われる経路がない
 - 🤖 **エージェントがそのまま動く**：`~/.claude` はライブ共有、ssh-agent はフォワード。VM 内の Claude Code はホストの資格情報で動き、`git push` も通る
+- 🔌 **オーケストレータ向け契約**：`wtx ensure --json` はversion付きready receipt、`wtx inspect --json` はruntime/owner状態を返し、`wtx exec --tty` は対話agent TUIをSSH越しに接続する
 - 📦 **内蔵レジストリキャッシュ**：pull-through キャッシュを wtx 自身が実装（Docker 不要）。launchd がオンデマンド起動し、常駐プロセスなし
 - 📱 **worktree 専用 iOS シミュレータ**：`wtx sim` が worktree ごとの専用デバイスを VM と対にし、UDID とポートを環境変数でエージェントに渡す
 - 🖥️ **TUI コンソール**：全 VM をプロジェクトごとにまとめ、ミラーの稼働状況とともに1画面で操作する
@@ -211,7 +212,9 @@ wtx は OSS スタック（Lima）でアカウント不要、ホストの `.git`
 | `wtx new BRANCH [--dir DIR]` | worktree と VM を一発で作成（ブランチが無ければ作る。`--from` や `--sim` も使える） |
 | `wtx up [NAME] [DIR]` | 既存 worktree に VM を作成して起動。引数なしはカレントディレクトリから解決（ゴールデン VM を clone、約8秒） |
 | `wtx up NAME DIR --from SRC` | 既存 VM から引き継いで作成（volume、イメージ、ツールが乗り移る） |
-| `wtx exec NAME [-w DIR] CMD…` | VM 内でコマンド実行（終了コードは素通し） |
+| `wtx ensure [NAME] [DIR] [--json]` | VMを冪等に作成・起動してdockerd readyまで待機。owner来歴も記録可 |
+| `wtx inspect [NAME] [--json]` | VM/worktreeのready、seed、owner、port、Simulator状態を取得 |
+| `wtx exec NAME [-w DIR] [--tty] CMD…` | VM 内でコマンド実行（終了コードは素通し、`--tty`で対話agent CLI対応） |
 | `wtx shell NAME` | VM 内の対話シェル |
 | `wtx ls [--json]` | VM 一覧（worktree 消失の孤児 VM も表示） |
 | `wtx` / `wtx tui` | TUI コンソール（`--snapshot` で tty なし1フレーム描画） |
@@ -229,9 +232,28 @@ wtx は OSS スタック（Lima）でアカウント不要、ホストの `.git`
 
 ## オーケストレータ（Orca 等）との連携方針
 
-wtx は何にも依存しない。連携はすべて汎用インターフェース経由になる。
+wtx は何にも依存しない。監督付きworkerでは、task/worktreeはオーケストレータ、runtimeだけをwtxが所有する。
 
-- Orca terminal から `wtx up` / `wtx exec` / `wtx shell` をそのまま呼べる（`wtx exec` の終了コードは素通し）
+```bash
+wtx ensure worker-a /abs/worktree \
+  --owner orca \
+  --owner-label run_id=run_123 \
+  --owner-label task_id=task_456 \
+  --owner-label dispatch_id=dispatch_789 \
+  --json
+wtx inspect worker-a --json
+wtx exec worker-a --tty -w /abs/worktree claude
+```
+
+`ensure` は、VMが無ければ作成、停止中なら起動、実行中なら再利用し、dockerd readyまで待つ。
+既存VMに対する作成専用の`--from`は再cloneせず、記録済みseedと一致するか検証する。
+JSON receiptは`schema_version: 1`を持つ。owner labelはcleanup・監査用の不透明なmetadataであり、
+wtx自身はtask statusやdispatchを管理しない。
+境界とreceipt schemaの詳細は[docs/DESIGN-orchestration.md](docs/DESIGN-orchestration.md)。
+
+その他の連携点:
+
+- Orca terminal から `wtx ensure` / `wtx exec` / `wtx shell` をそのまま呼べる（`wtx exec` の終了コードは素通し）
 - worker 内からホストの runtime に届かせたいときは `wtx bridge NAME GUEST:HOST`
 - 完了通知をファイルで受けるなら、共有マウント上に `.result/` を書く運用も可
 

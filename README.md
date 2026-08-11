@@ -54,6 +54,9 @@ the host branch itself, and `git push` and `claude` just work. No Docker Desktop
   on the host branch directly, so deleting a VM cannot lose committed work
 - 🤖 **Agent-ready out of the box** — `~/.claude` is live-shared and the ssh-agent is
   forwarded: Claude Code runs inside the VM with host credentials, and `git push` works
+- 🔌 **Orchestrator-ready contract** — `wtx ensure --json` returns a versioned readiness
+  receipt, `wtx inspect --json` reports runtime/owner state, and `wtx exec --tty` carries
+  interactive agent TUIs over SSH
 - 📦 **Built-in registry cache** — a pull-through cache implemented in wtx itself
   (no Docker required), activated on demand by launchd, with no resident process
 - 📱 **Per-worktree iOS simulators** — `wtx sim` pairs a dedicated simulator device with
@@ -242,7 +245,9 @@ there is no collection step. The evaluation notes are in
 | `wtx new BRANCH [--dir DIR]` | Create a git worktree and its VM in one step (the branch is created if missing; `--from`, `--sim` etc. apply) |
 | `wtx up [NAME] [DIR]` | Create/start a VM for an existing worktree; with no args, resolves from the current directory (clones the golden VM, ~8 s) |
 | `wtx up NAME DIR --from SRC` | Seed from an existing VM: volumes, images, tools carry over |
-| `wtx exec NAME [-w DIR] CMD…` | Run a command in the VM; exit code passes through |
+| `wtx ensure [NAME] [DIR] [--json]` | Idempotently create/start a VM and wait for dockerd; optionally record owner provenance |
+| `wtx inspect [NAME] [--json]` | Report VM/worktree readiness, seed, owner, ports, and simulator state |
+| `wtx exec NAME [-w DIR] [--tty] CMD…` | Run a command in the VM; exit code passes through; `--tty` supports interactive agent CLIs |
 | `wtx shell NAME` | Interactive shell inside the VM |
 | `wtx ls [--json]` | List VMs; flags orphans whose worktree is gone |
 | `wtx` / `wtx tui` | TUI console (`--snapshot` for a single ttyless frame) |
@@ -260,9 +265,30 @@ there is no collection step. The evaluation notes are in
 
 ## Working with orchestrators and agents
 
-wtx depends on nothing; everything goes through generic interfaces:
+wtx depends on nothing; everything goes through generic interfaces. For a supervised
+worker, let the orchestrator own tasks/worktrees and let wtx own only runtime state:
 
-- Call `wtx up` / `wtx exec` / `wtx shell` from any terminal-driving orchestrator
+```bash
+wtx ensure worker-a /abs/worktree \
+  --owner orca \
+  --owner-label run_id=run_123 \
+  --owner-label task_id=task_456 \
+  --owner-label dispatch_id=dispatch_789 \
+  --json
+wtx inspect worker-a --json
+wtx exec worker-a --tty -w /abs/worktree claude
+```
+
+`ensure` is idempotent: it creates a missing VM, starts a stopped VM, or reuses a running
+one, then waits for dockerd. Creation-only `--from` is checked against recorded provenance
+on an existing VM rather than cloning again. JSON receipts carry `schema_version: 1`.
+Owner labels are opaque cleanup/audit metadata; wtx does not own task status or dispatch.
+The stable boundary and receipt schema are documented in
+[docs/DESIGN-orchestration.md](docs/DESIGN-orchestration.md) (Japanese).
+
+Additional integration points:
+
+- Call `wtx ensure` / `wtx exec` / `wtx shell` from any terminal-driving orchestrator
   (Orca, for example) — `wtx exec` passes exit codes through untouched
 - Reach a host-resident runtime from inside a worker VM with `wtx bridge NAME GUEST:HOST`
 - For file-based completion signals, write a `.result/` directory on the shared mount

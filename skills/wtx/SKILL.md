@@ -57,7 +57,10 @@ wtx new BRANCH                         # worktree + VM を一発で作成（repo
 wtx new BRANCH --from NAME             # 既存VMからDB(volume)・イメージごと引き継いで作成
 wtx up                                 # worktree内で引数なし: そのworktreeのVMを解決して作成/起動
 wtx up NAME ~/repos/worktree-dir       # 明示形（worktree自動判別、gitはホストと共有）
+wtx ensure NAME ~/repos/worktree-dir --json # 冪等に作成/起動し、dockerd ready receiptを返す
+wtx inspect NAME --json                # runtime・worktree・owner・port・sim状態
 wtx exec NAME -w ~/repos/worktree-dir docker compose up -d --wait
+wtx exec NAME --tty -w ~/repos/worktree-dir claude # 対話agent CLIをPTY接続
 wtx shell NAME                         # 対話シェル（中で claude も使える）
 wtx rm NAME [--with-worktree]          # VM削除（DB・イメージごと消える。コミットはホストに残る）
 wtx ls --json                          # 一覧（機械可読。worktreeが消えたVMは orphaned 扱い）
@@ -72,6 +75,14 @@ wtx                                    # 引数なしで ratatui コンソール
   VM行では `s` 起動/停止、`d` 削除、`Enter` でシェル。
 - `wtx exec` は **argv 素通し**でシェル構文を解釈しない。パイプ・glob・リダイレクトは
   `wtx exec NAME bash -c '...'` の形で渡す。終了コードは素通しされる。
+- 対話agent CLIは `wtx exec NAME --tty [-w DIR] CMD...` で起動する。`--tty` はSSHのPTYを
+  強制割り当てし、window resize・signal・終了コードをSSH経由で中継する。
+- オーケストレータからは `wtx ensure ... --json` を使う。VMが無ければ作成、停止中なら起動、
+  実行中なら再利用し、dockerd readyまで待って `schema_version: 1` のreceiptを返す。
+  `--owner orca --owner-label run_id=... --owner-label task_id=...` のようにcleanup用の来歴を
+  記録できるが、wtx自身はtask statusやdispatch lifecycleを管理しない。
+- `ensure` で既存VMに `--from` を指定した場合は再cloneせず、記録済み `seeded_from` と
+  一致するか検証する。違うseedへ変更したい場合は新しいVMを作る。
 - `wtx up` の主なフラグ: `--from`（既存VMから環境を引き継ぐ）、`--memory/--cpus`
   （省略時は新規 4GiB/2、clone は元の値を引き継ぐ）、`--disk`（新規プロビジョニング時のみ）、
   `--no-claude`（`~/.claude` をマウントしない）、
@@ -165,6 +176,7 @@ wtx mirror [status|serve|up|down|install|uninstall] # 省略時 status
   （その場合はホスト側で push するか、`ssh-add` で鍵を載せてもらう）。
 - 旧バージョンのwtx（隔離gitモード）で作られたVMでは、VM内コミットがホストに現れない。
   `wtx up` での再アタッチ時に警告が出たら、そのVMは作り直す。
-- オーケストレータ（Orca 等）からは `wtx up` / `wtx exec` をそのまま呼べばよい。
+- オーケストレータ（Orca 等）からは `wtx ensure --json` / `wtx inspect --json` /
+  `wtx exec --tty` を使う。worktreeとtaskはオーケストレータ、runtimeはwtxが所有する。
   worker から ホスト常駐サービスへ届かせるには `wtx bridge`。完了通知は
   共有マウント上のファイル（例: `.result/`）で受ける運用も可。
