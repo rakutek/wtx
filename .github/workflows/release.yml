@@ -69,7 +69,7 @@ jobs:
           mkdir -p "dist/${package}"
           cp target/release/wtx LICENSE-MIT LICENSE-APACHE "dist/${package}/"
           tar -czf "dist/${ARCHIVE}" -C dist "${package}"
-          shasum -a 256 "dist/${ARCHIVE}" > "dist/${ARCHIVE}.sha256"
+          (cd dist && shasum -a 256 "${ARCHIVE}" > "${ARCHIVE}.sha256")
 
       - name: Publish GitHub Release
         shell: bash
