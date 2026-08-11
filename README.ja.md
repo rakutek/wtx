@@ -7,7 +7,7 @@
 プロジェクトへwtx専用設定を足さず、各エージェントへいつもの`localhost:5432`と
 DBごとcloneできる専用runtimeを渡す。
 
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#ライセンス)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](#ライセンス)
 [![Platform: macOS on Apple Silicon](https://img.shields.io/badge/platform-macOS%20on%20Apple%20Silicon-black.svg?logo=apple)](#動作環境)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](Cargo.toml)
 [![CI](https://github.com/rakutek/wtx/actions/workflows/ci.yml/badge.svg)](https://github.com/rakutek/wtx/actions/workflows/ci.yml)
@@ -195,9 +195,5 @@ CLI、help、TUIは英語。READMEには[英語版](README.md)があり、一部
 
 ## ライセンス
 
-次のいずれかを選択できる。
-
-- Apache License, Version 2.0（[LICENSE-APACHE](LICENSE-APACHE)）
-- MIT License（[LICENSE-MIT](LICENSE-MIT)）
-
-特に明示しない限り、このrepositoryへ提出されたcontributionも同じ条件でdual-licenseされる。
+このrepositoryはMIT License（[LICENSE-MIT](LICENSE-MIT)）で公開しています。
+特に明示しない限り、このrepositoryへ提出されたcontributionもMIT Licenseで扱います。

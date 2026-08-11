@@ -4,7 +4,7 @@
 次の処理を自動実行する。
 
 1. `Cargo.toml` の version とタグが一致することを確認する
-2. `aarch64-apple-darwin` バイナリ、MIT/Apache-2.0 ライセンスを tar.gz にまとめる
+2. `aarch64-apple-darwin` バイナリをMITライセンスで tar.gz にまとめる
 3. SHA-256 チェックサムとともに GitHub Releases へ公開する
 4. `rakutek/homebrew-tap` の `Formula/wtx.rb` を同じ version / SHA-256 に更新する
 

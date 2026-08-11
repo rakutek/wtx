@@ -7,7 +7,7 @@
 Give parallel coding agents an unchanged `localhost:5432` and a cloneable DB/runtime per
 worktree, without adding wtx-specific configuration to the project.
 
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 [![Platform: macOS on Apple Silicon](https://img.shields.io/badge/platform-macOS%20on%20Apple%20Silicon-black.svg?logo=apple)](#requirements)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](Cargo.toml)
 [![CI](https://github.com/rakutek/wtx/actions/workflows/ci.yml/badge.svg)](https://github.com/rakutek/wtx/actions/workflows/ci.yml)
@@ -198,10 +198,6 @@ The CLI, help text, and TUI are English. This README also has a
 
 ## License
 
-Licensed under either:
-
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-- MIT License ([LICENSE-MIT](LICENSE-MIT))
-
-at your option. Contributions intentionally submitted for inclusion are dual-licensed under
-the same terms unless explicitly stated otherwise.
+This repository is licensed under the MIT License ([LICENSE-MIT](LICENSE-MIT)).
+Contributions intentionally submitted for inclusion are licensed under MIT unless
+explicitly stated otherwise.

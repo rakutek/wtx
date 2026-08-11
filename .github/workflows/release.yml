@@ -67,7 +67,7 @@ jobs:
           set -euo pipefail
           package="wtx-${VERSION}-${TARGET}"
           mkdir -p "dist/${package}"
-          cp target/release/wtx LICENSE-MIT LICENSE-APACHE "dist/${package}/"
+          cp target/release/wtx LICENSE-MIT "dist/${package}/"
           tar -czf "dist/${ARCHIVE}" -C dist "${package}"
           (cd dist && shasum -a 256 "${ARCHIVE}" > "${ARCHIVE}.sha256")
 
