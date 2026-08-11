@@ -1138,3 +1138,26 @@ pub fn new(branch: &str, dir: Option<&str>, o: UpOpts) -> Result<()> {
     }
     up(&name, &dirstr, o)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remove_receipt_uses_stable_machine_contract() {
+        let receipt = RemoveReceipt {
+            schema_version: RECEIPT_SCHEMA_VERSION,
+            action: RemoveAction::NotFound,
+            name: "vm-a",
+        };
+
+        assert_eq!(
+            serde_json::to_value(receipt).unwrap(),
+            serde_json::json!({
+                "schema_version": 1,
+                "action": "not_found",
+                "name": "vm-a",
+            })
+        );
+    }
+}
