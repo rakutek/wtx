@@ -21,7 +21,7 @@ use std::path::Path;
 #[command(
     name = "wtx",
     version,
-    about = "Per-worktree VMs with in-VM dockerd and a built-in registry cache"
+    about = "Worktree X: per-worktree VMs with in-VM dockerd and a built-in registry cache"
 )]
 struct Cli {
     #[command(subcommand)]
