@@ -1,5 +1,5 @@
 use crate::mirror;
-use crate::repo::{self, RepoKind};
+use crate::repo::{self, RepoInfo, RepoKind};
 use crate::util::{
     git_config_global, git_out, git_run, lima_dir, lima_status, lima_status_checked, limactl,
     limactl_capture, limactl_out, pad, shq, wtx_home,
@@ -556,33 +556,26 @@ fn validate_agent_access(existed: bool, requested: bool, previous_enabled: bool)
     Ok(())
 }
 
-fn up_inner(name: &str, workdir: &str, o: &UpOpts, quiet: bool) -> Result<()> {
-    let workdir = std::fs::canonicalize(workdir)?;
-    if !workdir.is_dir() {
-        return Err(anyhow!("workdir not found: {}", workdir.display()));
-    }
-    if !mirror::mirror_alive() {
-        eprintln!("wtx: warning: mirror is down - pulls go straight upstream (wtx mirror up)");
-    }
-
-    let repo = repo::inspect_repo(&workdir)?;
-
+fn collect_mounts(
+    workdir: &Path,
+    repo: Option<&RepoInfo>,
+    o: &UpOpts,
+    host_claude: &Path,
+) -> Result<Vec<Mount>> {
     let mut mounts = vec![Mount {
         location: workdir.to_string_lossy().into_owned(),
         writable: true,
     }];
-    if let Some(r) = &repo {
-        if r.kind == RepoKind::Worktree {
-            // Mount the main `.git` separately because it is outside the workdir. The mount is
-            // read-write, so commits made in the VM advance the host branch directly.
-            mounts.push(Mount {
-                location: r.host_git.to_string_lossy().into_owned(),
-                writable: true,
-            });
-        }
+    if let Some(repo) = repo.filter(|repo| repo.kind == RepoKind::Worktree) {
+        // Mount the main `.git` separately because it is outside the workdir. The mount is
+        // read-write, so commits made in the VM advance the host branch directly.
+        mounts.push(Mount {
+            location: repo.host_git.to_string_lossy().into_owned(),
+            writable: true,
+        });
     }
+
     // Do not share credentials by default. Require explicit opt-in for a trusted in-VM agent.
-    let host_claude = dirs::home_dir().unwrap_or_default().join(".claude");
     if o.agent_access {
         if host_claude.is_dir() {
             mounts.push(Mount {
@@ -596,34 +589,24 @@ fn up_inner(name: &str, workdir: &str, o: &UpOpts, quiet: bool) -> Result<()> {
             );
         }
     }
-    for m in &o.extra_mounts {
-        let (loc, w) = m
+
+    for mount in &o.extra_mounts {
+        let (location, writable) = mount
             .strip_suffix(":ro")
-            .map_or((m.as_str(), true), |location| (location, false));
-        let abs = std::fs::canonicalize(loc)?.to_string_lossy().into_owned();
-        if mounts.iter().any(|x| x.location == abs) {
-            eprintln!("wtx: ignoring {abs}: already mounted automatically");
+            .map_or((mount.as_str(), true), |location| (location, false));
+        let location = std::fs::canonicalize(location)?
+            .to_string_lossy()
+            .into_owned();
+        if mounts.iter().any(|mount| mount.location == location) {
+            eprintln!("wtx: ignoring {location}: already mounted automatically");
             continue;
         }
-        mounts.push(Mount {
-            location: abs,
-            writable: w,
-        });
+        mounts.push(Mount { location, writable });
     }
+    Ok(mounts)
+}
 
-    let yaml = wtx_home().join(format!("{name}.yaml"));
-    render_yaml(
-        &mounts,
-        o.cpus.unwrap_or(2),
-        o.memory.as_deref().unwrap_or("4GiB"),
-        &o.disk,
-        o.agent_access,
-        &yaml,
-    )?;
-
-    let status = lima_status(name);
-    let existed = !status.is_empty();
-    let previous_meta = load_meta(name);
+fn warn_legacy_agent_policy(name: &str, existed: bool) {
     if existed
         && std::fs::read_to_string(meta_path(name))
             .ok()
@@ -635,57 +618,67 @@ fn up_inner(name: &str, workdir: &str, o: &UpOpts, quiet: bool) -> Result<()> {
             "wtx: warning: {name} predates explicit credential policy and may still share host credentials; recreate it"
         );
     }
-    validate_agent_access(
-        existed,
-        o.agent_access,
-        previous_meta.as_ref().is_some_and(|meta| meta.agent_access),
-    )
-    .map_err(|error| anyhow!("{name}: {error}"))?;
-    let path = provision_path(&status, o.from.is_some(), o.no_clone)?;
-    if path == ProvisionPath::Seed {
-        let src = o.from.as_deref().expect("seed path requires --from");
-        // Clone an existing VM to retain database volumes, images, and installed tools.
-        // Copy the stopped disk to produce a consistent at-rest snapshot.
-        if src == name {
-            return Err(anyhow!("--from {src}: cannot seed a VM from itself"));
-        }
-        let src_status = lima_status(src);
-        if src_status.is_empty() {
-            return Err(anyhow!("--from {src}: no such VM"));
-        }
-        let was_running = src_status == "Running";
-        if was_running {
-            if !quiet {
-                println!("stopping {src} for a consistent copy (it restarts in the background)...");
+}
+
+fn provision_instance(
+    name: &str,
+    workdir: &Path,
+    o: &UpOpts,
+    mounts: &[Mount],
+    yaml: &Path,
+    status: &str,
+    quiet: bool,
+) -> Result<ProvisionPath> {
+    let path = provision_path(status, o.from.is_some(), o.no_clone)?;
+    match path {
+        ProvisionPath::Seed => {
+            let src = o.from.as_deref().expect("seed path requires --from");
+            // Clone an existing VM to retain database volumes, images, and installed tools.
+            // Copy the stopped disk to produce a consistent at-rest snapshot.
+            if src == name {
+                return Err(anyhow!("--from {src}: cannot seed a VM from itself"));
             }
-            up_limactl(&["stop", src], quiet)?;
-        }
-        let args = clone_args(src, name, o, &mounts);
-        up_limactl(&args.iter().map(String::as_str).collect::<Vec<_>>(), quiet)?;
-        if was_running {
-            // Restart the source while starting the new VM so it remains stopped only for
-            // the clone operation.
-            let _ = std::process::Command::new("limactl")
-                .args(["start", "--tty=false", src])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
-        }
-        up_limactl(&["start", name, "--tty=false"], quiet)?;
-        seed_cleanup(name, src, &workdir, quiet)?;
-    } else if path == ProvisionPath::Reattach {
-        // Reattach an existing instance; its mount configuration was fixed at creation time.
-        if status != "Running" {
+            let src_status = lima_status(src);
+            if src_status.is_empty() {
+                return Err(anyhow!("--from {src}: no such VM"));
+            }
+            let was_running = src_status == "Running";
+            if was_running {
+                if !quiet {
+                    println!(
+                        "stopping {src} for a consistent copy (it restarts in the background)..."
+                    );
+                }
+                up_limactl(&["stop", src], quiet)?;
+            }
+            let args = clone_args(src, name, o, mounts);
+            up_limactl(&args.iter().map(String::as_str).collect::<Vec<_>>(), quiet)?;
+            if was_running {
+                // Restart the source while starting the new VM so it remains stopped only for
+                // the clone operation.
+                let _ = std::process::Command::new("limactl")
+                    .args(["start", "--tty=false", src])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+            }
             up_limactl(&["start", name, "--tty=false"], quiet)?;
+            seed_cleanup(name, src, workdir, quiet)
         }
-    } else if path == ProvisionPath::Golden {
-        let _golden_lock = ensure_golden(quiet)?;
-        let args = clone_args(GOLDEN, name, o, &mounts);
-        up_limactl(&args.iter().map(String::as_str).collect::<Vec<_>>(), quiet)?;
-        up_limactl(&["start", name, "--tty=false"], quiet)?;
-    } else {
-        debug_assert_eq!(path, ProvisionPath::Fresh);
-        up_limactl(
+        ProvisionPath::Reattach => {
+            // Reattach an existing instance; its mount configuration was fixed at creation time.
+            if status != "Running" {
+                up_limactl(&["start", name, "--tty=false"], quiet)?;
+            }
+            Ok(())
+        }
+        ProvisionPath::Golden => {
+            let _golden_lock = ensure_golden(quiet)?;
+            let args = clone_args(GOLDEN, name, o, mounts);
+            up_limactl(&args.iter().map(String::as_str).collect::<Vec<_>>(), quiet)?;
+            up_limactl(&["start", name, "--tty=false"], quiet)
+        }
+        ProvisionPath::Fresh => up_limactl(
             &[
                 "start",
                 "--name",
@@ -694,62 +687,78 @@ fn up_inner(name: &str, workdir: &str, o: &UpOpts, quiet: bool) -> Result<()> {
                 &yaml.to_string_lossy(),
             ],
             quiet,
-        )?;
-    }
+        ),
+    }?;
+    Ok(path)
+}
 
+fn rebuild_meta(
+    workdir: &Path,
+    repo: Option<&RepoInfo>,
+    o: &UpOpts,
+    existed: bool,
+    previous: InstanceMeta,
+) -> InstanceMeta {
     // Preserve simulator and port assignments when reattaching because metadata is rewritten.
-    let prev = previous_meta.unwrap_or_default();
     let mut meta = InstanceMeta {
         workdir: workdir.to_string_lossy().into_owned(),
-        seeded_from: o.from.clone().unwrap_or(prev.seeded_from),
-        sim_udid: prev.sim_udid,
-        sim_devicetype: prev.sim_devicetype,
-        ports: prev.ports,
+        seeded_from: o.from.clone().unwrap_or(previous.seeded_from),
+        sim_udid: previous.sim_udid,
+        sim_devicetype: previous.sim_devicetype,
+        ports: previous.ports,
         agent_access: if existed {
-            prev.agent_access
+            previous.agent_access
         } else {
             o.agent_access
         },
         ..Default::default()
     };
-    if let Some(r) = &repo {
-        meta.main_repo = r.host_repo.to_string_lossy().into_owned();
-        meta.branch.clone_from(&r.branch);
-        // VMs created by older wtx versions can retain an isolated Git overlay, causing commits
-        // to remain local to the VM instead of appearing on the host. Require recreation.
-        if existed && o.from.is_none() {
-            let marker = format!(
-                "test -e {}/.wtx-local && echo legacy || true",
-                shq(&r.host_git.to_string_lossy())
+    if let Some(repo) = repo {
+        meta.main_repo = repo.host_repo.to_string_lossy().into_owned();
+        meta.branch.clone_from(&repo.branch);
+    }
+    meta
+}
+
+fn warn_legacy_git_overlay(name: &str, repo: Option<&RepoInfo>, reattached: bool) {
+    let Some(repo) = repo.filter(|_| reattached) else {
+        return;
+    };
+    // VMs created by older wtx versions can retain an isolated Git overlay, causing commits
+    // to remain local to the VM instead of appearing on the host. Require recreation.
+    let marker = format!(
+        "test -e {}/.wtx-local && echo legacy || true",
+        shq(&repo.host_git.to_string_lossy())
+    );
+    if let Ok(out) = crate::sshx::capture(name, &marker) {
+        if out.contains("legacy") {
+            eprintln!(
+                "wtx: warning: {name} was created by an older wtx with isolated git; \
+                 commits made inside it do NOT reach the host. Recreate it: wtx rm {name} && wtx up ..."
             );
-            if let Ok(out) = crate::sshx::capture(name, &marker) {
-                if out.contains("legacy") {
-                    eprintln!(
-                        "wtx: warning: {name} was created by an older wtx with isolated git; \
-                         commits made inside it do NOT reach the host. Recreate it: wtx rm {name} && wtx up ..."
-                    );
-                }
-            }
         }
     }
-    if let Err(e) = mirror::apply_to_vm(name) {
-        eprintln!("wtx: warning: mirror config not applied: {e}");
-    }
-    apply_host_git_identity(name, quiet)?;
+}
+
+fn link_agent_credentials(name: &str, meta: &InstanceMeta, host_claude: &Path) {
     // Mounts are fixed at creation. In an existing VM created without `--agent-access`, the
     // mount target is absent, so the script's `-d` guard skips symlink creation.
-    if meta.agent_access && host_claude.is_dir() {
-        let script = format!(
-            r#"set -eu
+    if !meta.agent_access || !host_claude.is_dir() {
+        return;
+    }
+    let script = format!(
+        r#"set -eu
 H={h}
 [ -d "$H" ] || exit 0
 if [ ! -L "$HOME/.claude" ]; then rm -rf "$HOME/.claude"; ln -s "$H" "$HOME/.claude"; fi"#,
-            h = shq(&host_claude.to_string_lossy()),
-        );
-        if let Err(e) = crate::sshx::vm_script(name, &script, None) {
-            eprintln!("wtx: warning: could not link ~/.claude in the VM: {e}");
-        }
+        h = shq(&host_claude.to_string_lossy()),
+    );
+    if let Err(e) = crate::sshx::vm_script(name, &script, None) {
+        eprintln!("wtx: warning: could not link ~/.claude in the VM: {e}");
     }
+}
+
+fn reconcile_simulator(name: &str, o: &UpOpts, quiet: bool, meta: &mut InstanceMeta) {
     // With `--from`, clone the source simulator and its applications and data when present.
     // Retain only label-to-guest port definitions and allocate new host ports, because source
     // and destination cannot use the same host port concurrently.
@@ -769,18 +778,73 @@ if [ ! -L "$HOME/.claude" ]; then rm -rf "$HOME/.claude"; ln -s "$H" "$HOME/.cla
     }
     if o.sim || o.sim_device.is_some() {
         if let Err(e) =
-            crate::sim::ensure_device_with_output(name, &mut meta, o.sim_device.as_deref(), !quiet)
+            crate::sim::ensure_device_with_output(name, meta, o.sim_device.as_deref(), !quiet)
         {
             eprintln!("wtx: warning: simulator not created: {e}");
         }
     }
-    save_meta(name, &meta)?;
-    // Restore forwards lost during a VM stop when a regular `wtx up` reattaches it.
-    for (label, port) in &meta.ports {
+}
+
+fn restore_forwards(name: &str, ports: &BTreeMap<String, PortMap>) {
+    for (label, port) in ports {
         if let Err(e) = crate::sshx::ensure_forward(name, port.host, port.guest) {
             eprintln!("wtx: warning: forward {label} not armed: {e}");
         }
     }
+}
+
+fn up_inner(name: &str, workdir: &str, o: &UpOpts, quiet: bool) -> Result<()> {
+    let workdir = std::fs::canonicalize(workdir)?;
+    if !workdir.is_dir() {
+        return Err(anyhow!("workdir not found: {}", workdir.display()));
+    }
+    if !mirror::mirror_alive() {
+        eprintln!("wtx: warning: mirror is down - pulls go straight upstream (wtx mirror up)");
+    }
+
+    let repo = repo::inspect_repo(&workdir)?;
+    let host_claude = dirs::home_dir().unwrap_or_default().join(".claude");
+    let mounts = collect_mounts(&workdir, repo.as_ref(), o, &host_claude)?;
+
+    let yaml = wtx_home().join(format!("{name}.yaml"));
+    render_yaml(
+        &mounts,
+        o.cpus.unwrap_or(2),
+        o.memory.as_deref().unwrap_or("4GiB"),
+        &o.disk,
+        o.agent_access,
+        &yaml,
+    )?;
+
+    let status = lima_status(name);
+    let existed = !status.is_empty();
+    let previous_meta = load_meta(name);
+    warn_legacy_agent_policy(name, existed);
+    validate_agent_access(
+        existed,
+        o.agent_access,
+        previous_meta.as_ref().is_some_and(|meta| meta.agent_access),
+    )
+    .map_err(|error| anyhow!("{name}: {error}"))?;
+    let path = provision_instance(name, &workdir, o, &mounts, &yaml, &status, quiet)?;
+
+    let mut meta = rebuild_meta(
+        &workdir,
+        repo.as_ref(),
+        o,
+        existed,
+        previous_meta.unwrap_or_default(),
+    );
+    warn_legacy_git_overlay(name, repo.as_ref(), path == ProvisionPath::Reattach);
+    if let Err(e) = mirror::apply_to_vm(name) {
+        eprintln!("wtx: warning: mirror config not applied: {e}");
+    }
+    apply_host_git_identity(name, quiet)?;
+    link_agent_credentials(name, &meta, &host_claude);
+    reconcile_simulator(name, o, quiet, &mut meta);
+    save_meta(name, &meta)?;
+    // Restore forwards lost during a VM stop when a regular `wtx up` reattaches it.
+    restore_forwards(name, &meta.ports);
     Ok(())
 }
 
@@ -1458,6 +1522,85 @@ mod tests {
             .windows(2)
             .any(|v| v == ["--set", ".ssh.forwardAgent=true"]));
         assert!(args.iter().any(|v| v == "/tmp/work tree:w"));
+    }
+
+    #[test]
+    fn mount_collection_keeps_automatic_mounts_unique_and_extra_modes() {
+        let root = tempfile::tempdir().unwrap();
+        let workdir = root.path().join("worktree");
+        let host_git = root.path().join("main/.git");
+        let host_claude = root.path().join(".claude");
+        let extra = root.path().join("extra");
+        for path in [&workdir, &host_git, &host_claude, &extra] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let workdir = std::fs::canonicalize(workdir).unwrap();
+        let repo = RepoInfo {
+            kind: RepoKind::Worktree,
+            host_git: host_git.clone(),
+            host_repo: root.path().join("main"),
+            branch: "feature".into(),
+        };
+        let mut options = opts();
+        options.agent_access = true;
+        options.extra_mounts = vec![
+            format!("{}:ro", extra.display()),
+            workdir.to_string_lossy().into_owned(),
+        ];
+
+        let mounts = collect_mounts(&workdir, Some(&repo), &options, &host_claude).unwrap();
+
+        assert_eq!(mounts.len(), 4);
+        assert_eq!(mounts[0].location, workdir.to_string_lossy());
+        assert!(mounts[0].writable);
+        assert_eq!(mounts[1].location, host_git.to_string_lossy());
+        assert!(mounts[1].writable);
+        assert_eq!(mounts[2].location, host_claude.to_string_lossy());
+        assert!(mounts[2].writable);
+        assert_eq!(
+            mounts[3].location,
+            std::fs::canonicalize(extra).unwrap().to_string_lossy()
+        );
+        assert!(!mounts[3].writable);
+    }
+
+    #[test]
+    fn metadata_rebuild_preserves_reattached_runtime_assignments() {
+        let workdir = Path::new("/tmp/worktree");
+        let repo = RepoInfo {
+            kind: RepoKind::Normal,
+            host_git: workdir.join(".git"),
+            host_repo: workdir.to_path_buf(),
+            branch: "feature".into(),
+        };
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "api".into(),
+            PortMap {
+                host: 42000,
+                guest: 3000,
+            },
+        );
+        let previous = InstanceMeta {
+            seeded_from: "seed-vm".into(),
+            sim_udid: "sim-udid".into(),
+            sim_devicetype: "iPhone".into(),
+            ports,
+            agent_access: true,
+            ..Default::default()
+        };
+
+        let meta = rebuild_meta(workdir, Some(&repo), &opts(), true, previous);
+
+        assert_eq!(meta.workdir, "/tmp/worktree");
+        assert_eq!(meta.main_repo, "/tmp/worktree");
+        assert_eq!(meta.branch, "feature");
+        assert_eq!(meta.seeded_from, "seed-vm");
+        assert_eq!(meta.sim_udid, "sim-udid");
+        assert_eq!(meta.sim_devicetype, "iPhone");
+        assert!(meta.agent_access);
+        let api = &meta.ports["api"];
+        assert_eq!((api.host, api.guest), (42000, 3000));
     }
 
     #[test]

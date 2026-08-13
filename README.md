@@ -4,8 +4,8 @@
 
 **The same localhost, a different runtime, for every worktree.**
 
-Give parallel coding agents an unchanged `localhost:5432` and a cloneable DB/runtime per
-worktree, without adding wtx-specific configuration to the project.
+Run many branches in parallel on the same machine without port conflicts, without project-specific
+setup, and without giving up the normal localhost workflow.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 [![Platform: macOS on Apple Silicon](https://img.shields.io/badge/platform-macOS%20on%20Apple%20Silicon-black.svg?logo=apple)](#requirements)
@@ -18,12 +18,15 @@ English | [日本語](README.ja.md)
 
 ---
 
-Parallel agents on separate branches still collide when they share one Docker daemon, one
-database, and one `localhost:5432`. **wtx** gives every git worktree a dedicated
-Lima/vz microVM with its own dockerd, volumes, images, and localhost namespace.
+Many teams already split work into many branches, but parallel agents still hit the same shared runtime:
+database ports collide, caches conflict, and service state leaks between branches.  
+**wtx** solves this with per-worktree virtual machines while keeping your host git workflow intact.
 
-Agents, editors, Git, and credentials stay on the macOS host. Docker, databases, services,
-and container-dependent tests run through `wtx exec`. Docker Desktop is not required.
+With wtx, each worktree gets a dedicated Lima/vz microVM that has its own `dockerd`, volumes,
+images, and localhost namespace so parallel work stays fast and isolated without daily manual cleanup.
+
+Your agents, editors, Git repos, and credentials stay on macOS. Container services and tests run in
+the VM through `wtx exec`, and Docker Desktop is not required.
 
 ```text
  wtx   mirror[launchd]  ●docker.io
@@ -42,20 +45,25 @@ and container-dependent tests run through `wtx exec`. Docker Desktop is not requ
  j/k:move  Enter:shell/fold  s:start/stop  d:delete  Space:fold  r:refresh  q:quit
 ```
 
+## Why wtx
+
+- **Keep branch switching cheap**: create or remove workspaces as part of your Git flow without rebuilding full stacks.
+- **Avoid localhost wars**: every VM has its own loopback and services, while the host still uses normal host tools.
+- **Run real-world parallelism**: separate runtime state means no branch-to-branch interference for CI-like checks.
+- **Cloneability by default**: bootstrap new branches from a seeded baseline instead of repeating heavy setup.
+- **Predictable collaboration**: orchestrator-friendly metadata and JSON APIs make machine-run automation stable.
+
 ## Highlights
 
-- **Start from a prepared VM:** clone a pre-provisioned golden VM instead of provisioning
-  every environment from scratch.
-- **Clone the useful state:** `wtx up --from` carries database volumes, images, installed
-  tools, and optionally simulator data into a new worktree.
-- **Keep normal ports:** every worktree can use its usual `localhost:5432`; no branch-specific
-  port offsets or project configuration are needed.
-- **Share Git directly:** commits made in a VM land on the host branch, with no collection or
-  sync step.
-- **Automate through stable commands:** `ensure --json` and `inspect --json` expose
-  versioned readiness and ownership data.
-- **Optional batteries included:** a bounded registry cache, per-worktree iOS simulators, a
-  project-grouped TUI, and one-command Homebrew upgrades.
+- **Ready-to-use VMs:** clone a pre-provisioned golden VM (`wtx new`, `wtx up --from`) and start
+  testing immediately.
+- **Stateful cloning:** copy database volumes, images, installed tools, and optional simulator data between
+  worktrees.
+- **Zero port gymnastics:** keep `localhost:5432` available in each worktree without manual per-branch
+  port remapping.
+- **Native git workflow:** edits stay in the same files and `.git` directory on the host; no extra sync layer is required.
+- **Automation-first:** machine-readable `ensure --json` and `inspect --json` for orchestrators and dashboards.
+- **Built-in extras:** bounded image registry cache, per-worktree simulators, project-grouped TUI, and one-command updates.
 
 > [!WARNING]
 > **wtx isolates runtime collisions, not trust.** Worktree files and `.git` are writable host
@@ -84,6 +92,11 @@ brew install rakutek/tap/wtx
 
 ## Quick start
 
+1. Start from a branch and create an isolated worktree+VM.
+2. Start required services in that VM with your usual compose command.
+3. Export and use mapped host ports for local access.
+4. Repeat for another branch without disrupting the first environment.
+
 ```bash
 cd ~/repos/myapp
 wtx new feature-a     # create a worktree and VM; first use prepares the shared base VM
@@ -97,6 +110,23 @@ wtx new feature-b --from myapp-feature-a # carry over DB data, images, and tools
 
 wtx rm myapp-feature-a --with-worktree    # remove the VM and linked worktree
 wtx                                      # open the TUI
+```
+
+## Who is this for?
+
+- **Parallel feature devs**: multiple people or agents testing variants against one repo with fewer surprises.
+- **Onboarding teams**: new engineers can boot consistent branches quickly from a known-good base VM.
+- **Automation operators**: orchestrators can create and clean deterministic worker environments from CI-style tasks.
+
+## Command flow at a glance
+
+```text
+host (Git + editor + credentials)
+   ├─ wtx new / wtx up         -> create VM for worktree
+   ├─ wtx exec -- <cmd>        -> run branch-specific container commands
+   ├─ wtx port add / wtx env    -> expose service endpoints safely
+   ├─ wtx ensure / wtx inspect  -> get structured readiness metadata
+   └─ wtx rm / wtx prune        -> cleanly teardown when done
 ```
 
 ## How it works
