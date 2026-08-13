@@ -22,6 +22,22 @@ minimal workflow, start with the [README](../README.md).
 
 The exact trust and credential boundary is documented in [TRUST-MODEL.md](TRUST-MODEL.md).
 
+## Automatic orphan cleanup
+
+Git has no worktree-removal hook that wtx can use, so deleting a worktree cannot synchronously
+delete its VM. Instead, `up`, `new`, and `ensure` scan for orphaned VMs at most once per hour.
+The first observation stops the orphan and starts a seven-day recovery window. If the
+worktree returns, its marker is cleared; otherwise a later VM setup deletes the VM, its
+recorded forwards, and its dedicated simulator.
+
+`wtx ls` and the TUI show whether the recovery window has started. `wtx prune --yes` remains
+the immediate cleanup path. Set `WTX_NO_AUTO_PRUNE=1` when a worktree path can intentionally
+disappear for longer, such as on a detached external volume.
+
+VMs from the old isolated-Git design may contain commits that never reached the host. Automatic
+cleanup stops but does not delete those VMs, and bulk `prune` skips them. Inspect them and use
+explicit `wtx rm` only after deciding that their VM-local Git state is no longer needed.
+
 ## Seed an environment (`wtx up --from`)
 
 `wtx up NAME DIR --from SRC` clones an existing VM instead of the golden image. Docker

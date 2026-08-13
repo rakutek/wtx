@@ -93,5 +93,11 @@ VM内で通常の`docker compose`として実行する。host Dockerへのsilent
 どちらも成功終了する。`wtx rm --with-worktree`はwtx単独運用向けであり、Orca/Herdr管理下では
 使わない。
 
+`up` / `new` / `ensure`による7日猶予の孤児VM自動回収は、cleanup漏れに対する安全網である。
+実行時刻も完了receiptも保証しない。
+自動回収の通知とwarningはstderrへ出力し、`ensure --json`のstdoutには混ぜない。
+VM内だけにcommitが残る旧隔離Git形式を検出した場合は、自動回収と`prune --yes`の対象から外す。
+そのため、オーケストレータはこれを通常のcleanup経路として扱わず、引き続き`rm --if-exists --json`の成功を確認してからworktreeを閉じる。
+
 Orcaのarchive hookはUI操作時の安全網として同じcleanupを実行できるが、coding agentによる
 削除ではarchive hookだけに依存せず、先に明示的な`wtx rm`成功を確認する。

@@ -81,7 +81,7 @@ impl UpFlags {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Create and start a VM (the host git is shared: commits in the VM land on the host)
+    /// Create/start a VM and run the rate-limited orphan cleanup sweep
     Up {
         /// VM name, or a directory (a single argument containing `/` counts as DIR).
         /// Omit both to resolve from the current directory
@@ -93,7 +93,7 @@ enum Cmd {
         #[command(flatten)]
         flags: UpFlags,
     },
-    /// Idempotently create or start a VM and wait until dockerd is ready
+    /// Idempotently prepare a VM, sweep old orphans, and wait until dockerd is ready
     Ensure {
         /// VM name, or a directory (a single argument containing `/` counts as DIR).
         /// Omit both to resolve from the current directory
@@ -119,7 +119,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Create a git worktree and its VM in one step (the branch is created if missing)
+    /// Create a git worktree and VM in one step, while sweeping old orphaned VMs
     New {
         /// Branch to check out in the new worktree
         branch: String,
@@ -198,7 +198,7 @@ enum Cmd {
     },
     /// Stop a VM
     Stop { name: Option<String> },
-    /// Delete a VM (its databases and images go with it; commits are already on the host)
+    /// Delete a VM and its runtime state (inspect legacy isolated Git first)
     Rm {
         name: String,
         /// Also remove the linked git worktree the VM was created from
@@ -211,7 +211,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Delete VMs whose worktree no longer exists
+    /// Delete eligible VMs whose worktree no longer exists
     Prune {
         /// Actually delete them (without this, only report what would be deleted)
         #[arg(long)]

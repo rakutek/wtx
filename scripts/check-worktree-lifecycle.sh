@@ -43,23 +43,23 @@ chk "VM 2台が起動" "[ \$(limactl list wtxcheck-a wtxcheck-b --format '{{.Sta
 chk "この時点では孤児ではない" "! $WTX ls | grep -q orphaned"
 
 echo "=== 2b. 資格情報共有は既定OFF、明示opt-in ==="
-chk "既定VMでは ~/.claude を共有しない" "$WTX exec wtxcheck-b -- bash -c 'test ! -L ~/.claude'"
-chk "既定VMでは ssh-agent に到達しない" "$WTX exec wtxcheck-b -- bash -c 'ssh-add -l >/dev/null 2>&1; test \$? -eq 2'"
+chk "既定VMでは ~/.claude を共有しない" "$WTX exec --name wtxcheck-b -- bash -c 'test ! -L ~/.claude'"
+chk "既定VMでは ssh-agent に到達しない" "$WTX exec --name wtxcheck-b -- bash -c 'ssh-add -l >/dev/null 2>&1; test \$? -eq 2'"
 if [ -d "$HOME/.claude" ]; then
-  chk "--agent-access VMでは ~/.claude を共有" "$WTX exec wtxcheck-a -- bash -c 'test -L ~/.claude && test -d ~/.claude/'"
+  chk "--agent-access VMでは ~/.claude を共有" "$WTX exec --name wtxcheck-a -- bash -c 'test -L ~/.claude && test -d ~/.claude/'"
 else
   echo "SKIP  ホストに ~/.claude が無いため確認省略"
 fi
 if [ -n "${SSH_AUTH_SOCK:-}" ]; then
   # `ssh-add -l` returns 0 with keys, 1 without keys, and 2 when the agent is unreachable.
   # This checks forwarding itself, so any result other than 2 succeeds.
-  chk "--agent-access VMでは ssh-agent が届く" "$WTX exec wtxcheck-a -- bash -c 'ssh-add -l >/dev/null 2>&1; [ \$? -ne 2 ]'"
+  chk "--agent-access VMでは ssh-agent が届く" "$WTX exec --name wtxcheck-a -- bash -c 'ssh-add -l >/dev/null 2>&1; [ \$? -ne 2 ]'"
 else
   echo "SKIP  ホストに SSH_AUTH_SOCK が無いため確認省略"
 fi
 
 echo "=== 2c. Simulatorなしのnamed port ==="
-$WTX exec wtxcheck-b -- bash -c 'nohup python3 -m http.server 8765 >/dev/null 2>&1 & sleep 1' >/dev/null 2>&1
+$WTX exec --name wtxcheck-b -- bash -c 'nohup python3 -m http.server 8765 >/dev/null 2>&1 & sleep 1' >/dev/null 2>&1
 (cd "$REPO-b" && $WTX port add api:8765 >/dev/null 2>&1) || fail "port add api:8765"
 PORT_API=$(cd "$REPO-b" && $WTX env --json | python3 -c 'import json, sys; print(json.load(sys.stdin)["ports"]["api"]["host"])')
 chk "env --jsonがhost portを返す"           "test -n '$PORT_API'"
@@ -72,15 +72,15 @@ chk "TUI にプロジェクト見出しと [2/2 running]" "grep -q 'wtxcheck' /t
 
 echo "=== 4. VM内コミットがホストに直接反映される（共有git） ==="
 chk "cwd解決execはNAME/-w不要" "cd '$REPO-a' && test \"\$($WTX exec -- pwd)\" = '$REPO-a'"
-$WTX exec wtxcheck-a -w "$REPO-a" bash -c 'echo a > a.txt && git add a.txt && git commit -qm "work in VM A"' >/dev/null 2>&1
+$WTX exec --name wtxcheck-a -w "$REPO-a" -- bash -c 'echo a > a.txt && git add a.txt && git commit -qm "work in VM A"' >/dev/null 2>&1
 chk "ホストの feat-a にコミットが見える"   "git -C '$REPO' log --oneline feat-a | grep -q 'work in VM A'"
 chk "ホスト側 worktree はクリーン"          "[ -z \"\$(git -C '$REPO-a' status --porcelain)\" ]"
 chk "gc保護ref は作られない"                "[ \$(git -C '$REPO' for-each-ref refs/wtx/ | wc -l) -eq 0 ]"
 
 echo "=== 5. 2台のVMから同一リポジトリへ同時コミット（virtiofs 越しの ref ロック） ==="
-$WTX exec wtxcheck-a -w "$REPO-a" bash -c 'for i in 1 2 3; do echo a$i > race-a$i.txt && git add . && git commit -qm "race A $i"; done' >/dev/null 2>&1 &
+$WTX exec --name wtxcheck-a -w "$REPO-a" -- bash -c 'for i in 1 2 3; do echo a$i > race-a$i.txt && git add . && git commit -qm "race A $i"; done' >/dev/null 2>&1 &
 PID_A=$!
-$WTX exec wtxcheck-b -w "$REPO-b" bash -c 'for i in 1 2 3; do echo b$i > race-b$i.txt && git add . && git commit -qm "race B $i"; done' >/dev/null 2>&1 &
+$WTX exec --name wtxcheck-b -w "$REPO-b" -- bash -c 'for i in 1 2 3; do echo b$i > race-b$i.txt && git add . && git commit -qm "race B $i"; done' >/dev/null 2>&1 &
 PID_B=$!
 wait $PID_A; RC_A=$?
 wait $PID_B; RC_B=$?
@@ -97,7 +97,7 @@ chk "コミットはホストに残っている" "git -C '$REPO' log --oneline f
 chk "メタデータが消えた"        "[ ! -f ~/.wtx/wtxcheck-a.json ]"
 
 echo "=== 7. worktree を外部から消したときの孤児検出 ==="
-$WTX exec wtxcheck-b -w "$REPO-b" bash -c 'echo b > b.txt && git add b.txt && git commit -qm "work in VM B"' >/dev/null 2>&1
+$WTX exec --name wtxcheck-b -w "$REPO-b" -- bash -c 'echo b > b.txt && git add b.txt && git commit -qm "work in VM B"' >/dev/null 2>&1
 git -C "$REPO" worktree remove --force "$REPO-b"
 chk "wtx ls が orphaned と表示"  "$WTX ls | grep wtxcheck-b | grep -q orphaned"
 $WTX tui --snapshot > /tmp/wtxcheck-tui2.txt 2>&1

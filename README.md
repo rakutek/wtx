@@ -63,6 +63,7 @@ the VM through `wtx exec`, and Docker Desktop is not required.
   port remapping.
 - **Native git workflow:** edits stay in the same files and `.git` directory on the host; no extra sync layer is required.
 - **Automation-first:** machine-readable `ensure --json` and `inspect --json` for orchestrators and dashboards.
+- **Bounded VM growth:** preparing a VM stops newly orphaned VMs and automatically removes them after a seven-day recovery window.
 - **Built-in extras:** bounded image registry cache, per-worktree simulators, project-grouped TUI, and one-command updates.
 
 > [!WARNING]
@@ -176,8 +177,14 @@ simulators, the TUI, and updates in detail.
 | `wtx env` | Export `WTX_PORT_*` values and re-arm recorded forwards |
 | `wtx forward HOST:GUEST` | Publish a VM port on the host |
 | `wtx stop [NAME]` / `wtx rm NAME` | Stop or remove a VM |
-| `wtx prune --yes` | Remove VMs whose worktrees are gone |
+| `wtx prune --yes` | Immediately remove eligible orphaned VMs |
 | `wtx` | Open the TUI |
+
+`up`, `new`, and `ensure` check for orphaned VMs at most once per hour. A newly observed
+orphan is stopped, then automatically removed during a later VM setup after a seven-day
+recovery window. Legacy isolated-Git VMs are never auto-deleted because they may contain
+VM-local commits. Set `WTX_NO_AUTO_PRUNE=1` when a worktree path, such as one on an external
+volume, may intentionally remain unavailable for longer.
 
 See the [complete command reference](docs/CLI.md) or run `wtx --help`.
 

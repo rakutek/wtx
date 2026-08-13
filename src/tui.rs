@@ -612,9 +612,23 @@ fn draw(f: &mut Frame, app: &mut App) {
                 );
             }
             if i.orphaned {
-                d.push_str(
-                    "\nORPHANED: the worktree is gone (commits are on the host; delete when done)",
-                );
+                if i.auto_prune_blocked {
+                    d.push_str(
+                        "\nORPHANED: the worktree is gone; legacy Git may contain VM-local commits",
+                    );
+                    d.push_str("\nauto-prune: blocked; inspect before explicit rm");
+                } else {
+                    d.push_str(
+                        "\nORPHANED: the worktree is gone (commits are on the host; delete when done)",
+                    );
+                    if lima::auto_prune_disabled() {
+                        d.push_str("\nauto-prune: disabled by WTX_NO_AUTO_PRUNE");
+                    } else if i.orphaned_since.is_some() {
+                        d.push_str("\nauto-prune: deletion on a later VM setup after 7 days");
+                    } else {
+                        d.push_str("\nauto-prune: starts during the next VM setup");
+                    }
+                }
             }
             d
         }

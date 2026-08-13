@@ -13,7 +13,17 @@ while `--memory` and `--cpus` can override inherited values.
 ## Lifecycle and cleanup
 
 - Deleting a worktree does not delete its VM because git provides no hook for wtx. `wtx ls`
-  and the TUI mark these VMs as `orphaned`; `wtx prune --yes` removes them.
+  and the TUI mark these VMs as `orphaned`.
+- VM preparation through `up`, `new`, or `ensure` runs an automatic orphan sweep at most once
+  per hour. The first sweep stops a newly orphaned VM and records when it was observed. If its
+  worktree does not return, a later VM preparation deletes it after a seven-day recovery
+  window. The current target and a `--from` source are excluded from that sweep.
+- Automatic and bulk prune skip legacy isolated-Git VMs because their commits may exist only
+  inside the VM. `wtx ls`, the TUI, and JSON inspection flag them for manual inspection and
+  explicit `wtx rm` cleanup.
+- `wtx prune --yes` still removes all eligible current orphans immediately. Set
+  `WTX_NO_AUTO_PRUNE=1` to disable automatic sweeps, for example when worktrees live on an
+  external volume that can remain unavailable for more than seven days.
 - `wtx rm NAME --with-worktree` removes a VM and its linked worktree together. It deliberately
   leaves a normal repository directory untouched.
 - Commits made in a current wtx VM are already stored in the host `.git`, so VM deletion does

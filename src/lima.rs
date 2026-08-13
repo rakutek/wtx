@@ -10,12 +10,19 @@ use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const GOLDEN: &str = "wtx-golden";
 const PROVISION_SCHEMA_VERSION: u32 = 2;
 const PROVISION_DOCKER_VERSION: &str = "29.7.2";
 const TEMPLATE: &str = include_str!("../templates/vm.yaml.tmpl");
+const AUTO_PRUNE_STATE_SCHEMA_VERSION: u32 = 1;
+const AUTO_PRUNE_INTERVAL_SECS: u64 = 60 * 60;
+const AUTO_PRUNE_GRACE_SECS: u64 = 7 * 24 * 60 * 60;
+
+const fn is_false(value: &bool) -> bool {
+    !*value
+}
 
 #[derive(Debug, Clone)]
 pub struct Mount {
@@ -45,6 +52,12 @@ pub struct InstanceMeta {
     /// Whether the VM was created with explicit access to `~/.claude` and the SSH agent.
     #[serde(default)]
     pub agent_access: bool,
+    /// First automatic observation that the worktree was gone. Active worktrees never expire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orphaned_since: Option<u64>,
+    /// Compatibility marker from versions whose Git commits could live only inside the VM.
+    #[serde(default, rename = "isolated", skip_serializing_if = "is_false")]
+    pub legacy_isolated_git: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -70,6 +83,8 @@ struct WorktreeInspection {
     #[serde(skip_serializing_if = "String::is_empty")]
     head: String,
     orphaned: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    orphaned_since: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -104,6 +119,8 @@ struct InstanceInspection {
     simulator: Option<SimulatorInspection>,
     ports: BTreeMap<String, PortInspection>,
     agent_access: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    legacy_isolated_git: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -133,6 +150,21 @@ struct RemoveReceipt<'a> {
     name: &'a str,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct AutoPruneState {
+    schema_version: u32,
+    swept_at: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutoPruneAction {
+    None,
+    ClearMarker,
+    Track,
+    Stop,
+    Delete,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RemoveOpts {
     pub with_worktree: bool,
@@ -149,7 +181,20 @@ pub fn load_meta(name: &str) -> Option<InstanceMeta> {
 }
 
 pub fn save_meta(name: &str, meta: &InstanceMeta) -> Result<()> {
-    std::fs::write(meta_path(name), serde_json::to_string_pretty(meta)?)?;
+    write_json_atomic(&meta_path(name), meta)
+}
+
+fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
+    let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    let raw = serde_json::to_vec_pretty(value)?;
+    if let Err(error) = std::fs::write(&tmp, raw) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error.into());
+    }
+    if let Err(error) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error.into());
+    }
     Ok(())
 }
 
@@ -244,6 +289,211 @@ fn golden_lock() -> Result<File> {
         ));
     }
     Ok(file)
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn auto_prune_state_path() -> PathBuf {
+    // Instance metadata occupies `<name>.json`; use a different extension so a valid VM name
+    // can never collide with housekeeping state.
+    wtx_home().join("auto-prune.state")
+}
+
+pub fn auto_prune_disabled() -> bool {
+    std::env::var("WTX_NO_AUTO_PRUNE")
+        .is_ok_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
+fn read_auto_prune_state() -> Option<AutoPruneState> {
+    let state: AutoPruneState =
+        serde_json::from_str(&std::fs::read_to_string(auto_prune_state_path()).ok()?).ok()?;
+    (state.schema_version == AUTO_PRUNE_STATE_SCHEMA_VERSION).then_some(state)
+}
+
+fn auto_prune_due(now: u64) -> bool {
+    read_auto_prune_state().is_none_or(|state| {
+        state.swept_at > now || now.saturating_sub(state.swept_at) >= AUTO_PRUNE_INTERVAL_SECS
+    })
+}
+
+fn auto_prune_lock() -> Result<Option<File>> {
+    let path = wtx_home().join("auto-prune.lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)?;
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result == 0 {
+        return Ok(Some(file));
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return Ok(None);
+    }
+    Err(anyhow!("lock {}: {error}", path.display()))
+}
+
+fn auto_prune_action(
+    worktree_exists: bool,
+    orphaned_since: Option<u64>,
+    now: u64,
+    running: bool,
+) -> AutoPruneAction {
+    if worktree_exists {
+        return if orphaned_since.is_some() {
+            AutoPruneAction::ClearMarker
+        } else {
+            AutoPruneAction::None
+        };
+    }
+    match orphaned_since {
+        None => AutoPruneAction::Track,
+        Some(since) if since > now => AutoPruneAction::Track,
+        Some(since) if now.saturating_sub(since) >= AUTO_PRUNE_GRACE_SECS => {
+            AutoPruneAction::Delete
+        }
+        Some(_) if running => AutoPruneAction::Stop,
+        Some(_) => AutoPruneAction::None,
+    }
+}
+
+fn worktree_available(meta: &InstanceMeta) -> bool {
+    if meta.workdir.is_empty() {
+        return false;
+    }
+    let workdir = Path::new(&meta.workdir);
+    if !workdir.is_dir() {
+        return false;
+    }
+    // Non-Git directories are supported and have no repository identity to validate.
+    if meta.main_repo.is_empty() {
+        return true;
+    }
+    let Ok(expected_repo) = std::fs::canonicalize(&meta.main_repo) else {
+        return false;
+    };
+    repo::inspect_repo(workdir)
+        .ok()
+        .flatten()
+        .and_then(|info| std::fs::canonicalize(info.host_repo).ok())
+        .is_some_and(|actual_repo| actual_repo == expected_repo)
+}
+
+fn legacy_lima_config(raw: &str) -> bool {
+    raw.contains("wtx-gitmount.service") || raw.contains("/var/lib/wtx/git")
+}
+
+fn auto_prune_blocked_by_legacy_git(name: &str, meta: &InstanceMeta) -> bool {
+    meta.legacy_isolated_git
+        || std::fs::read_to_string(lima_dir(name).join("lima.yaml"))
+            .is_ok_and(|raw| legacy_lima_config(&raw))
+}
+
+fn stop_auto_pruned_orphan(name: &str) {
+    match stop(name, true) {
+        Ok(()) => eprintln!(
+            "wtx: auto-prune stopped orphaned VM {name}; a later VM setup will delete it after 7 days unless its worktree returns"
+        ),
+        Err(error) => eprintln!("wtx: warning: auto-prune could not stop {name}: {error}"),
+    }
+}
+
+/// Bound VM growth without turning every CLI call into a destructive sweep. Before wtx
+/// allocates or reattaches a VM, scan at most once per hour. Newly orphaned VMs are stopped
+/// and timestamped; a later scan deletes them only after a seven-day recovery window.
+fn auto_prune(excluded: &[&str]) -> Result<()> {
+    if auto_prune_disabled() {
+        return Ok(());
+    }
+    let now = now_secs();
+    if !auto_prune_due(now) {
+        return Ok(());
+    }
+    let Some(_lock) = auto_prune_lock()? else {
+        return Ok(());
+    };
+    // Another allocator may have completed the sweep before this process acquired the lock.
+    if !auto_prune_due(now) {
+        return Ok(());
+    }
+
+    for instance in list_instances() {
+        if excluded.contains(&instance.name.as_str()) {
+            continue;
+        }
+        let Some(mut meta) = load_meta(&instance.name) else {
+            continue;
+        };
+        if meta.workdir.is_empty() {
+            continue;
+        }
+        let worktree_available = worktree_available(&meta);
+        if !worktree_available && instance.auto_prune_blocked {
+            if instance.status == "Running" {
+                match stop(&instance.name, true) {
+                    Ok(()) => eprintln!(
+                        "wtx: auto-prune stopped legacy VM {}; inspect its VM-local Git commits and remove it manually",
+                        instance.name
+                    ),
+                    Err(error) => eprintln!(
+                        "wtx: warning: auto-prune could not stop legacy VM {}: {error}",
+                        instance.name
+                    ),
+                }
+            }
+            continue;
+        }
+        let action = auto_prune_action(
+            worktree_available,
+            meta.orphaned_since,
+            now,
+            instance.status == "Running",
+        );
+        match action {
+            AutoPruneAction::None => {}
+            AutoPruneAction::ClearMarker => {
+                meta.orphaned_since = None;
+                save_meta(&instance.name, &meta)?;
+            }
+            AutoPruneAction::Track => {
+                meta.orphaned_since = Some(now);
+                save_meta(&instance.name, &meta)?;
+                if instance.status == "Running" {
+                    stop_auto_pruned_orphan(&instance.name);
+                }
+            }
+            AutoPruneAction::Stop => stop_auto_pruned_orphan(&instance.name),
+            AutoPruneAction::Delete => match remove_instance(
+                &instance.name,
+                RemoveOpts {
+                    if_exists: true,
+                    json: true,
+                    ..Default::default()
+                },
+            ) {
+                Ok(_) => eprintln!("wtx: auto-prune deleted orphaned VM {}", instance.name),
+                Err(error) => eprintln!(
+                    "wtx: warning: auto-prune could not delete {}: {error}",
+                    instance.name
+                ),
+            },
+        }
+    }
+
+    write_json_atomic(
+        &auto_prune_state_path(),
+        &AutoPruneState {
+            schema_version: AUTO_PRUNE_STATE_SCHEMA_VERSION,
+            swept_at: now,
+        },
+    )
 }
 
 fn image_build_inner(quiet: bool) -> Result<()> {
@@ -711,6 +961,7 @@ fn rebuild_meta(
         } else {
             o.agent_access
         },
+        legacy_isolated_git: existed && previous.legacy_isolated_git,
         ..Default::default()
     };
     if let Some(repo) = repo {
@@ -720,9 +971,9 @@ fn rebuild_meta(
     meta
 }
 
-fn warn_legacy_git_overlay(name: &str, repo: Option<&RepoInfo>, reattached: bool) {
+fn warn_legacy_git_overlay(name: &str, repo: Option<&RepoInfo>, reattached: bool) -> bool {
     let Some(repo) = repo.filter(|_| reattached) else {
-        return;
+        return false;
     };
     // VMs created by older wtx versions can retain an isolated Git overlay, causing commits
     // to remain local to the VM instead of appearing on the host. Require recreation.
@@ -736,8 +987,10 @@ fn warn_legacy_git_overlay(name: &str, repo: Option<&RepoInfo>, reattached: bool
                 "wtx: warning: {name} was created by an older wtx with isolated git; \
                  commits made inside it do NOT reach the host. Recreate it: wtx rm {name} && wtx up ..."
             );
+            return true;
         }
     }
+    false
 }
 
 fn link_agent_credentials(name: &str, meta: &InstanceMeta, host_claude: &Path) {
@@ -798,6 +1051,14 @@ fn up_inner(name: &str, workdir: &str, o: &UpOpts, quiet: bool) -> Result<()> {
     if !workdir.is_dir() {
         return Err(anyhow!("workdir not found: {}", workdir.display()));
     }
+    let mut auto_prune_exclusions = vec![name];
+    if let Some(source) = o.from.as_deref() {
+        auto_prune_exclusions.push(source);
+    }
+    if let Err(error) = auto_prune(&auto_prune_exclusions) {
+        // Cleanup is a safety net and must not make VM allocation unavailable.
+        eprintln!("wtx: warning: automatic orphan cleanup failed: {error}");
+    }
     if !mirror::mirror_alive() {
         eprintln!("wtx: warning: mirror is down - pulls go straight upstream (wtx mirror up)");
     }
@@ -835,7 +1096,8 @@ fn up_inner(name: &str, workdir: &str, o: &UpOpts, quiet: bool) -> Result<()> {
         existed,
         previous_meta.unwrap_or_default(),
     );
-    warn_legacy_git_overlay(name, repo.as_ref(), path == ProvisionPath::Reattach);
+    meta.legacy_isolated_git |=
+        warn_legacy_git_overlay(name, repo.as_ref(), path == ProvisionPath::Reattach);
     if let Err(e) = mirror::apply_to_vm(name) {
         eprintln!("wtx: warning: mirror config not applied: {e}");
     }
@@ -952,7 +1214,8 @@ fn inspect_instance(name: &str) -> Result<InstanceInspection> {
         load_meta(name).ok_or_else(|| anyhow!("no metadata for {name} (is it a wtx VM?)"))?;
     let status = lima_status(name);
     let docker_ready = status == "Running" && crate::sshx::docker_ready(name);
-    let orphaned = meta.workdir.is_empty() || !Path::new(&meta.workdir).exists();
+    let orphaned = !worktree_available(&meta);
+    let legacy_isolated_git = auto_prune_blocked_by_legacy_git(name, &meta);
     let head = if orphaned {
         String::new()
     } else {
@@ -1004,11 +1267,13 @@ fn inspect_instance(name: &str) -> Result<InstanceInspection> {
             branch: meta.branch,
             head,
             orphaned,
+            orphaned_since: meta.orphaned_since,
         },
         seeded_from: meta.seeded_from,
         simulator,
         ports,
         agent_access: meta.agent_access,
+        legacy_isolated_git,
     })
 }
 
@@ -1033,6 +1298,18 @@ pub fn inspect(name: Option<&str>, json: bool) -> Result<()> {
         if instance.ready { "ready" } else { "not ready" }
     );
     println!("  worktree: {}", instance.worktree.path);
+    if instance.worktree.orphaned {
+        println!(
+            "  auto-prune: {}",
+            if instance.legacy_isolated_git {
+                "blocked; legacy Git may contain VM-local commits"
+            } else if instance.worktree.orphaned_since.is_some() {
+                "recovery window started; deletion eligible on a later VM setup after 7 days"
+            } else {
+                "starts during the next VM setup"
+            }
+        );
+    }
     if !instance.worktree.branch.is_empty() {
         println!("  branch: {}", instance.worktree.branch);
     }
@@ -1171,8 +1448,8 @@ fn remove_managed_file(path: &Path) -> Result<()> {
     }
 }
 
-/// Clean up VMs orphaned by a removed worktree. Commits are stored directly in the host's
-/// `.git`, so deleting the VM does not discard work.
+/// Clean up VMs orphaned by a removed worktree. Skip legacy isolated-Git VMs because their
+/// commits may not have reached the host.
 pub fn prune(yes: bool) {
     let orphans: Vec<Instance> = list_instances()
         .into_iter()
@@ -1182,7 +1459,15 @@ pub fn prune(yes: bool) {
         println!("no orphaned VMs");
         return;
     }
+    let has_deletable_orphans = orphans.iter().any(|instance| !instance.auto_prune_blocked);
     for i in &orphans {
+        if i.auto_prune_blocked {
+            println!(
+                "  skip {}: legacy isolated Git may contain VM-local commits (inspect it, then use `wtx rm {}`)",
+                i.name, i.name
+            );
+            continue;
+        }
         if !yes {
             println!("  would delete {} (workdir gone: {})", i.name, i.workdir);
             continue;
@@ -1192,7 +1477,7 @@ pub fn prune(yes: bool) {
             Err(e) => println!("  failed to delete {}: {e}", i.name),
         }
     }
-    if !yes {
+    if !yes && has_deletable_orphans {
         println!("re-run with --yes to delete them");
     }
 }
@@ -1218,11 +1503,31 @@ pub fn ls() {
             .map(|i| i.sim_udid.clone())
             .collect::<Vec<_>>(),
     );
+    let automatic_cleanup_disabled = auto_prune_disabled();
     for i in &rows {
         let orphan = if i.orphaned {
-            "  (orphaned: workdir gone)"
+            let cleanup = if i.auto_prune_blocked {
+                "auto-prune blocked by legacy isolated Git".to_string()
+            } else if automatic_cleanup_disabled {
+                "auto-prune disabled".to_string()
+            } else {
+                i.orphaned_since.map_or_else(
+                    || "auto-prune starts on the next VM setup".to_string(),
+                    |since| {
+                        let remaining =
+                            AUTO_PRUNE_GRACE_SECS.saturating_sub(now_secs().saturating_sub(since));
+                        let days = remaining.div_ceil(24 * 60 * 60);
+                        if days == 0 {
+                            "auto-delete pending".to_string()
+                        } else {
+                            format!("auto-delete eligible in {days}d")
+                        }
+                    },
+                )
+            };
+            format!("  (orphaned: workdir gone; {cleanup})")
         } else {
-            ""
+            String::new()
         };
         let sim = if i.sim_udid.is_empty() {
             String::new()
@@ -1242,8 +1547,11 @@ pub fn ls() {
             orphan
         );
     }
-    if rows.iter().any(|i| i.orphaned) {
-        println!("\norphaned VMs can be cleaned up with `wtx prune`");
+    if rows.iter().any(|i| i.orphaned && !i.auto_prune_blocked) {
+        println!("\neligible orphaned VMs can be cleaned up with `wtx prune`");
+    }
+    if rows.iter().any(|i| i.orphaned && i.auto_prune_blocked) {
+        println!("legacy isolated-Git VMs require inspection and explicit `wtx rm`");
     }
 }
 
@@ -1261,6 +1569,10 @@ pub fn ls_json() -> Result<()> {
         sim_udid: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         sim_state: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        orphaned_since: Option<u64>,
+        #[serde(skip_serializing_if = "is_false")]
+        legacy_isolated_git: bool,
     }
     let rows = list_instances();
     let sim_states = crate::sim::states_for(
@@ -1289,6 +1601,8 @@ pub fn ls_json() -> Result<()> {
             workdir: i.workdir,
             repo: i.repo,
             orphaned: i.orphaned,
+            orphaned_since: i.orphaned_since,
+            legacy_isolated_git: i.auto_prune_blocked,
             sim_udid: i.sim_udid,
         })
         .collect();
@@ -1305,8 +1619,12 @@ pub struct Instance {
     pub branch: String,
     /// Project host repository root, used as the TUI grouping key.
     pub repo: String,
-    /// Whether the VM's worktree is gone. Deleting it does not lose host-stored commits.
+    /// Whether the VM's recorded worktree is gone or no longer matches its Git repository.
     pub orphaned: bool,
+    /// First automatic observation of the missing worktree, as Unix seconds.
+    pub orphaned_since: Option<u64>,
+    /// Automatic and bulk prune are blocked because commits may exist only inside this VM.
+    pub auto_prune_blocked: bool,
     /// Worktree-specific simulator UDID, empty if no simulator has been created.
     pub sim_udid: String,
 }
@@ -1317,11 +1635,14 @@ pub fn list_instances() -> Vec<Instance> {
         .filter_map(|l| {
             let (name, status) = l.split_once('\t')?;
             let meta = load_meta(name);
-            let workdir = meta.as_ref().map(|m| m.workdir.clone()).unwrap_or_default();
             Some(Instance {
                 name: name.to_string(),
                 status: status.to_string(),
-                orphaned: !workdir.is_empty() && !Path::new(&workdir).exists(),
+                orphaned: meta.as_ref().is_some_and(|m| !worktree_available(m)),
+                orphaned_since: meta.as_ref().and_then(|m| m.orphaned_since),
+                auto_prune_blocked: meta
+                    .as_ref()
+                    .is_some_and(|m| auto_prune_blocked_by_legacy_git(name, m)),
                 workdir: meta.as_ref().map(|m| m.workdir.clone()).unwrap_or_default(),
                 branch: meta.as_ref().map(|m| m.branch.clone()).unwrap_or_default(),
                 sim_udid: meta
@@ -1587,6 +1908,8 @@ mod tests {
             sim_devicetype: "iPhone".into(),
             ports,
             agent_access: true,
+            orphaned_since: Some(123),
+            legacy_isolated_git: true,
             ..Default::default()
         };
 
@@ -1599,8 +1922,114 @@ mod tests {
         assert_eq!(meta.sim_udid, "sim-udid");
         assert_eq!(meta.sim_devicetype, "iPhone");
         assert!(meta.agent_access);
+        assert_eq!(meta.orphaned_since, None);
+        assert!(meta.legacy_isolated_git);
         let api = &meta.ports["api"];
         assert_eq!((api.host, api.guest), (42000, 3000));
+    }
+
+    #[test]
+    fn auto_prune_tracks_stops_clears_and_eventually_deletes_orphans() {
+        let now = 10 * AUTO_PRUNE_GRACE_SECS;
+
+        assert_eq!(
+            auto_prune_action(true, None, now, true),
+            AutoPruneAction::None
+        );
+        assert_eq!(
+            auto_prune_action(true, Some(now - 10), now, false),
+            AutoPruneAction::ClearMarker
+        );
+        assert_eq!(
+            auto_prune_action(false, None, now, true),
+            AutoPruneAction::Track
+        );
+        assert_eq!(
+            auto_prune_action(false, Some(now + 10), now, false),
+            AutoPruneAction::Track
+        );
+        assert_eq!(
+            auto_prune_action(false, Some(now - 10), now, true),
+            AutoPruneAction::Stop
+        );
+        assert_eq!(
+            auto_prune_action(false, Some(now - 10), now, false),
+            AutoPruneAction::None
+        );
+        assert_eq!(
+            auto_prune_action(false, Some(now - AUTO_PRUNE_GRACE_SECS), now, false),
+            AutoPruneAction::Delete
+        );
+    }
+
+    #[test]
+    fn auto_prune_validates_git_identity_instead_of_only_the_path() {
+        let root = tempfile::tempdir().unwrap();
+        let workdir = root.path().join("worktree");
+        std::fs::create_dir(&workdir).unwrap();
+
+        let plain = InstanceMeta {
+            workdir: workdir.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        assert!(worktree_available(&plain));
+
+        let expected_repo = root.path().join("expected");
+        std::fs::create_dir(&expected_repo).unwrap();
+        let mismatched_git = InstanceMeta {
+            main_repo: expected_repo.to_string_lossy().into_owned(),
+            ..plain.clone()
+        };
+        assert!(!worktree_available(&mismatched_git));
+
+        std::fs::create_dir(workdir.join(".git")).unwrap();
+        std::fs::write(workdir.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let matching_git = InstanceMeta {
+            main_repo: workdir.to_string_lossy().into_owned(),
+            ..plain
+        };
+        assert!(worktree_available(&matching_git));
+    }
+
+    #[test]
+    fn auto_prune_state_is_replaced_atomically() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("auto-prune.state");
+        write_json_atomic(
+            &path,
+            &AutoPruneState {
+                schema_version: AUTO_PRUNE_STATE_SCHEMA_VERSION,
+                swept_at: 10,
+            },
+        )
+        .unwrap();
+        write_json_atomic(
+            &path,
+            &AutoPruneState {
+                schema_version: AUTO_PRUNE_STATE_SCHEMA_VERSION,
+                swept_at: 20,
+            },
+        )
+        .unwrap();
+
+        let state: AutoPruneState =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(state.swept_at, 20);
+    }
+
+    #[test]
+    fn legacy_isolated_git_metadata_and_lima_config_block_automatic_deletion() {
+        let meta: InstanceMeta = serde_json::from_value(serde_json::json!({
+            "workdir": "/tmp/legacy",
+            "isolated": true
+        }))
+        .unwrap();
+        assert!(meta.legacy_isolated_git);
+        assert_eq!(serde_json::to_value(&meta).unwrap()["isolated"], true);
+
+        assert!(legacy_lima_config("systemctl enable wtx-gitmount.service"));
+        assert!(legacy_lima_config("mkdir -p /var/lib/wtx/git"));
+        assert!(!legacy_lima_config("mountType: virtiofs"));
     }
 
     #[test]

@@ -128,6 +128,12 @@ docker volume（DBデータ）・pull済みイメージ・導入済みツール�
 コミットはホストの `.git` に刻まれているので、VMを消しても作業は失われない。
 
 - `wtx ls` / TUI は該当VMを `orphaned` と表示する
+- `wtx up` / `new` / `ensure`は1時間に一度まで孤児を確認し、初回検出時に停止する。
+  worktreeが戻らないまま7日経過すると、以後のVM準備時に自動削除する
+- VM内だけにcommitが残る旧隔離Git形式は自動削除と一括`prune`の対象外になる。
+  `wtx ls` / `inspect`の表示に従い、VM内Gitを確認してから明示的に`wtx rm`する
+- 外付けvolumeなどでworktree pathが7日以上消える場合は、その実行環境で
+  `WTX_NO_AUTO_PRUNE=1`を設定して自動回収を無効化する
 - `wtx prune`（dry-run）→ `wtx prune --yes` で孤児VMを削除
 - 最初から一度で片付けるなら `wtx rm NAME --with-worktree`
 

@@ -52,6 +52,7 @@ container依存testだけを`wtx exec`で実行する。Docker Desktopは不要�
 - **Gitを直接共有：** VM内のcommitはhost branchへそのまま反映され、回収や同期の工程がない
 - **安定した自動化interface：** `ensure --json`と`inspect --json`がversion付きの
   readiness情報を返す
+- **増え続けないVM：** 新しいVMの準備時に孤児VMを検出して停止し、7日の猶予後のVM準備時に自動削除する
 - **必要な機能を同梱：** 容量制限付きregistry cache、worktree専用iOS Simulator、
   project単位のTUI、Homebrew経由の1 command upgrade
 
@@ -142,8 +143,13 @@ flowchart LR
 | `wtx env` | `WTX_PORT_*`をexportし、記録済みforwardを再接続 |
 | `wtx forward HOST:GUEST` | VM portをhostへ公開 |
 | `wtx stop [NAME]` / `wtx rm NAME` | VMを停止・削除 |
-| `wtx prune --yes` | worktreeが消えたVMを削除 |
+| `wtx prune --yes` | 自動回収を待たず、対象となる孤児VMを即時削除 |
 | `wtx` | TUIを開く |
+
+`up` / `new` / `ensure`は、1時間に一度まで孤児VMを確認する。
+初回検出時にVMを停止し、worktreeが戻らないまま7日経過すると、以後のVM準備時に自動削除する。
+VM内だけにcommitが残る旧隔離Git形式を検出した場合は自動削除せず、手動確認を求める。
+外付けvolume上のworktreeを長期間外す場合などは`WTX_NO_AUTO_PRUNE=1`で無効化できる。
 
 全commandは[コマンドリファレンス](docs/CLI.md)または`wtx --help`を参照。
 
